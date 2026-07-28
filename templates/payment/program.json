@@ -1,0 +1,8 @@
+{
+    "program": "{{PROJECT_NAME}}.aleo",
+    "version": "0.1.0",
+    "description": "A minimal payment transfer program for Aleo",
+    "license": "MIT",
+    "dependencies": null,
+    "dev_dependencies": null
+}

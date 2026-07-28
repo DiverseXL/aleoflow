@@ -1,0 +1,25 @@
+target
+
+# Test/demo projects generated during development -- not part of the tool itself
+/diag-test
+/test-*
+/*-test
+/*-portable
+
+# Leo build output inside any generated project
+**/build/
+**/bindings/
+
+# Local secrets -- never commit these
+.env
+*.env
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local development build helper scripts
+build.bat
+checkenv.bat

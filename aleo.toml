@@ -1,0 +1,6 @@
+# AleoFlow configuration file (optional).
+# Place this file in the project root or the directory where you run aleoflow.
+# CLI flags always override these values.
+
+default_network = "testnet"
+default_template = "payment"
