@@ -204,7 +204,8 @@ Deployment requires a funded account. See **Deploying for real** below.
 
 Wraps `leo devnet` to start a local Aleo development network. Requires
 snarkOS; if it isn't installed, AleoFlow will tell you to run
-`leo devnet --install`.
+`leo devnet --snarkos <path> --install` on the first run (snarkOS is not bundled
+and must be built/installed separately).
 
 ```
 aleoflow devnet --path my-app
@@ -224,6 +225,25 @@ Generates real, working `@provablehq/sdk` execution calls via `buildExecutionTra
 
 ```
 aleoflow bindings my-app
+```
+
+### `aleoflow records list --view-key <key> --end <height> [--start <height>] [--endpoint <url>]`
+
+Wraps `snarkos developer scan`.
+
+> [!IMPORTANT]
+> **LOCAL-ONLY FEATURE**: This command does **not** work against the public testnet API at all (the public API blocks this RPC method). It only works against a locally running snarkOS node, such as one started via `leo devnet`.
+
+- `--view-key` (required): The view key cryptographically required to decrypt records (neither the private key nor address alone can be used).
+- `--end` (required): The end block height to scan to (no default).
+- `--start` (optional): The start block height to scan from (defaults to `0`).
+- `--endpoint` (optional): The RPC endpoint to scan against (defaults to `http://localhost:3030`).
+
+If snarkOS is not installed, AleoFlow will guide you to install it via `leo devnet --snarkos <path> --install`.
+
+Example:
+```
+aleoflow records list --view-key AViewKey1... --end 1000
 ```
 
 ## Proof of deployment
