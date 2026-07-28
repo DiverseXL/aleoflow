@@ -221,11 +221,7 @@ Parameter names are pulled from the `.leo` source directly, since Leo's
 ABI JSON does not currently preserve them. Output defaults to
 `<path>/bindings/<program_name>.ts`.
 
-Generated stubs are typed and named correctly but are **not** wired to
-the Aleo network — they're a starting point to reduce boilerplate, not a
-finished SDK integration. See
-<https://docs.aleo.org/build/sdk/getting_started> for wiring execution
-calls with `@provablehq/sdk`.
+Generates real, working `@provablehq/sdk` execution calls via `buildExecutionTransaction`. It requires the caller to set the `PRIVATE_KEY` and `ALEO_ENDPOINT` environment variables, and automatically handles `initializeWasm()` under the hood. All execution functions return a `{ success: true, txId } | { success: false, error }` result shape. Any record-typed parameters are left as a marked `TODO` rather than guessing at the structure conversion.
 
 ```
 aleoflow bindings my-app
@@ -333,7 +329,7 @@ suppressed — only informational status lines are silenced.
   `leo` and `snarkOS` binaries, which AleoFlow wraps.
 - `audit` is a heuristic linter for hackathon-demo purposes, not a
   security audit or formal verification tool.
-- `bindings` generates typed stubs, not a complete SDK integration.
+- `bindings` leaves complex record-typed parameter conversions as marked `TODO`s rather than automatically generating conversion logic for them.
 
 ## License
 
