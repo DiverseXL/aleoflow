@@ -23,3 +23,4 @@ Thumbs.db
 # Local development build helper scripts
 build.bat
 checkenv.bat
+/snarkos-bin

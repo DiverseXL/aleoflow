@@ -329,6 +329,5 @@ suppressed — only informational status lines are silenced.
   security audit or formal verification tool.
 - `bindings` generates typed stubs, not a complete SDK integration.
 
-## License
 
 No license file included. All rights reserved unless otherwise stated.

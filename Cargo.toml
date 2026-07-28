@@ -2,6 +2,9 @@
 name = "aleoflow"
 version = "0.1.0"
 edition = "2024"
+description = "A developer CLI for Aleo — scaffold, build, test, audit, deploy, and generate TypeScript bindings for Leo programs."
+repository = "https://github.com/DiverseXL/aleoflow"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
