@@ -38,10 +38,16 @@ underlying compiler or network logic.
 
 ## Install
 
-From source:
+Published on crates.io — install with a single command:
 
 ```
-git clone <your-repo-url>
+cargo install aleoflow
+```
+
+Or from source:
+
+```
+git clone https://github.com/DiverseXL/aleoflow
 cd aleoflow
 cargo install --path .
 ```
@@ -329,5 +335,6 @@ suppressed — only informational status lines are silenced.
   security audit or formal verification tool.
 - `bindings` generates typed stubs, not a complete SDK integration.
 
+## License
 
-No license file included. All rights reserved unless otherwise stated.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
