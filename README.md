@@ -161,14 +161,13 @@ aleoflow test --path my-app
 
 ### `aleoflow audit <path>`
 
-A heuristic static linter for Leo source files — **not** a formal
-verifier. Flags:
+A heuristic static linter for Leo source files — **not** a formal verifier. Checks include:
 
-- Sensitive-looking field names (`password`, `secret`, `private_key`,
-  `ssn`, etc.) that may be unintentionally exposed
-- Functions that return addresses or numeric values with no visible
-  `assert`/`require` guard nearby (informational, best-effort)
-- Leftover `TODO`/`FIXME` comments (informational)
+1. **Sensitive-named record fields declared public**: Detects record fields with sensitive names (e.g., `password`, `secret`, `private_key`, `ssn`) declared as public.
+2. **On-chain leaks via mapping writes**: Detects `Mapping::set` calls that write sensitive-named values to public on-chain mappings.
+3. **The "finalize-leak" check**: A single-hop, shallow data-flow check that catches private record fields (either directly or via a single intermediate `let` binding) being passed into `finalize` or asynchronous function calls. This prevents private record fields from being leaked onto the public on-chain ledger, a documented Aleo security vulnerability (see [Aleo Program Security](https://blog.zksecurity.xyz/posts/aleo-program-security/)) that `leo build` itself does not catch.
+   - *Note:* This check is single-hop/shallow and does not track multi-step reassignments, arithmetic transformations, or values passed through helper functions first.
+4. **TODO/FIXME comments**: Identifies leftover `TODO` or `FIXME` comments as informational findings.
 
 ```
 aleoflow audit ./my-app
@@ -327,8 +326,7 @@ suppressed — only informational status lines are silenced.
 - It does not re-implement Leo's compiler, the ZK proving system, or
   snarkOS's networking logic — all of that is handled by the official
   `leo` and `snarkOS` binaries, which AleoFlow wraps.
-- `audit` is a heuristic linter for hackathon-demo purposes, not a
-  security audit or formal verification tool.
+- `audit` is a heuristic static linter and not a formal verifier; its data-flow checks are shallow/single-hop and do not replace a comprehensive, manual security audit.
 - `bindings` leaves complex record-typed parameter conversions as marked `TODO`s rather than automatically generating conversion logic for them.
 
 ## License
