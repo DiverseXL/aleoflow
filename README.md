@@ -168,7 +168,7 @@ verifier. Flags:
 aleoflow audit ./my-app
 ```
 
-### `aleoflow deploy --path <path> --network <testnet|mainnet|canary> [--broadcast] [--json-output[=<file>]]`
+### `aleoflow deploy --path <path> --network <testnet|mainnet|canary> [--broadcast] [--endpoint <url>] [--json-output[=<file>]]`
 
 Wraps `leo deploy`. Runs in **dry-run mode by default** — it compiles and
 prepares the deployment but does not broadcast anything unless
@@ -178,12 +178,19 @@ default rather than re-implementing a separate confirmation flow.
 Deploying to `mainnet` with `--broadcast` prints an explicit warning
 before proceeding.
 
+`--endpoint` overrides the target RPC endpoint (useful for pointing at a
+local `leo devnet` node instead of the public testnet API, e.g. during
+an outage on the public endpoint).
+
 ```
 # Dry run — safe, does not deploy anything
 aleoflow deploy --path my-app --network testnet
 
 # Actually deploy to testnet
 aleoflow deploy --path my-app --network testnet --broadcast
+
+# Deploy against a local devnet instead of the public API
+aleoflow deploy --path my-app --network testnet --broadcast --endpoint http://localhost:3030
 ```
 
 Deployment requires a funded account. See **Deploying for real** below.
@@ -218,6 +225,19 @@ calls with `@provablehq/sdk`.
 aleoflow bindings my-app
 ```
 
+## Proof of deployment
+
+AleoFlow has been used to deploy a real program to Aleo testnet:
+
+- **Program:** `diag_test.aleo`
+- **Transaction ID:** `at13ujqtwaj7vmyvjm6hewuk4wevp3x94lqrd3mywrr6jm4ml59yups7j4lts`
+- **Explorer:** <https://explorer.aleo.org/transaction/at13ujqtwaj7vmyvjm6hewuk4wevp3x94lqrd3mywrr6jm4ml59yups7j4lts>
+
+Deployed with:
+```
+aleoflow deploy --path diag-test --network testnet --broadcast
+```
+
 ## Deploying for real
 
 `leo deploy` (and therefore `aleoflow deploy --broadcast`) requires a
@@ -246,6 +266,16 @@ Then:
 ```
 aleoflow deploy --path my-app --network testnet --broadcast
 ```
+
+**Note:** the public testnet API (`api.explorer.provable.com`) can
+occasionally return connection timeouts (Cloudflare 522) or fail to
+resolve the latest block height under load. This is an infrastructure
+issue on Aleo's side, not a local configuration problem — if you hit
+it, wait a few minutes and retry. As a fallback that removes the
+dependency on the public API entirely, you can run a local devnet
+(`leo devnet --snarkos ./snarkos-bin --install`, then
+`leo devnet --path my-app --snarkos ./snarkos-bin`) and deploy against
+it with `aleoflow deploy ... --endpoint http://localhost:3030`.
 
 ## `--json-output` and CI use
 
@@ -301,4 +331,4 @@ suppressed — only informational status lines are silenced.
 
 ## License
 
-MIT
+No license file included. All rights reserved unless otherwise stated.
