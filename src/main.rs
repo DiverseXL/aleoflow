@@ -97,6 +97,7 @@ static TEMPLATES: &[EmbeddedTemplate] = &[
             EmbeddedFile { rel_path: "program.json",   contents: include_str!("../templates/payment/program.json") },
             EmbeddedFile { rel_path: "src/main.leo",   contents: include_str!("../templates/payment/src/main.leo") },
             EmbeddedFile { rel_path: "README.md",      contents: include_str!("../templates/payment/README.md") },
+            EmbeddedFile { rel_path: "tests/test_program.leo", contents: include_str!("../templates/payment/tests/test_program.leo") },
         ],
     },
     EmbeddedTemplate {
@@ -105,6 +106,7 @@ static TEMPLATES: &[EmbeddedTemplate] = &[
             EmbeddedFile { rel_path: "program.json",   contents: include_str!("../templates/defi/program.json") },
             EmbeddedFile { rel_path: "src/main.leo",   contents: include_str!("../templates/defi/src/main.leo") },
             EmbeddedFile { rel_path: "README.md",      contents: include_str!("../templates/defi/README.md") },
+            EmbeddedFile { rel_path: "tests/test_program.leo", contents: include_str!("../templates/defi/tests/test_program.leo") },
         ],
     },
     EmbeddedTemplate {
@@ -113,6 +115,7 @@ static TEMPLATES: &[EmbeddedTemplate] = &[
             EmbeddedFile { rel_path: "program.json",   contents: include_str!("../templates/ai-agent/program.json") },
             EmbeddedFile { rel_path: "src/main.leo",   contents: include_str!("../templates/ai-agent/src/main.leo") },
             EmbeddedFile { rel_path: "README.md",      contents: include_str!("../templates/ai-agent/README.md") },
+            EmbeddedFile { rel_path: "tests/test_program.leo", contents: include_str!("../templates/ai-agent/tests/test_program.leo") },
         ],
     },
     EmbeddedTemplate {
@@ -121,6 +124,7 @@ static TEMPLATES: &[EmbeddedTemplate] = &[
             EmbeddedFile { rel_path: "program.json",   contents: include_str!("../templates/gamefi/program.json") },
             EmbeddedFile { rel_path: "src/main.leo",   contents: include_str!("../templates/gamefi/src/main.leo") },
             EmbeddedFile { rel_path: "README.md",      contents: include_str!("../templates/gamefi/README.md") },
+            EmbeddedFile { rel_path: "tests/test_program.leo", contents: include_str!("../templates/gamefi/tests/test_program.leo") },
         ],
     },
 ];
@@ -518,6 +522,8 @@ enum Commands {
     Test(TestArgs),
     /// Deploy a compiled Aleo program to a network
     Deploy(DeployArgs),
+    /// Format Leo source files with leo-fmt
+    Fmt(FmtArgs),
     /// Run a security audit on an Aleo project
     Audit(AuditArgs),
     /// Generate TypeScript bindings from a compiled Aleo program's ABI
@@ -618,6 +624,13 @@ struct AuditArgs {
 }
 
 #[derive(Args)]
+struct FmtArgs {
+    /// Path to the Aleo project directory (defaults to current dir)
+    #[arg(long)]
+    path: Option<PathBuf>,
+}
+
+#[derive(Args)]
 struct BindingsArgs {
     /// Path to the Aleo project directory
     path: PathBuf,
@@ -696,6 +709,7 @@ fn main() -> Result<()> {
         Commands::Build(args) => handle_build(args, quiet),
         Commands::Test(args) => handle_test(args, quiet),
         Commands::Deploy(args) => handle_deploy(args, quiet),
+        Commands::Fmt(args) => handle_fmt(args, quiet),
         Commands::Audit(args) => handle_audit(args, quiet),
         Commands::Bindings(args) => handle_bindings(args, quiet),
         Commands::Run(args) => handle_run(args, quiet),
@@ -829,6 +843,19 @@ fn handle_test(args: &TestArgs, quiet: bool) -> Result<()> {
     }
 
     leo_cmd::run_leo_with("test", &json_flags, dir)
+}
+
+fn handle_fmt(args: &FmtArgs, quiet: bool) -> Result<()> {
+    if !leo_cmd::leo_fmt_is_installed() {
+        bail!(
+            "leo-fmt was not found on PATH. Install it first: \
+             https://github.com/AleoHQ/leo-fmt"
+        );
+    }
+
+    let dir = args.path.as_deref();
+    print_info("Running 'leo fmt'...", quiet);
+    leo_cmd::run_leo_with("fmt", &[], dir)
 }
 
 fn handle_devnet(args: &DevnetArgs, quiet: bool) -> Result<()> {

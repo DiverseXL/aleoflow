@@ -57,6 +57,15 @@ pub fn snarkos_is_installed() -> bool {
         .unwrap_or(false)
 }
 
+/// Check whether `leo-fmt` (the leo fmt plugin) is available on PATH.
+pub fn leo_fmt_is_installed() -> bool {
+    Command::new("leo-fmt")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Build the `--json-output[=<PATH>]` flags based on the user's setting.
 /// Returns an empty vec if the flag was not passed.
 pub fn json_output_flag(json_output: &Option<Option<PathBuf>>) -> Vec<String> {
