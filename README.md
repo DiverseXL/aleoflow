@@ -2,7 +2,8 @@
 
 A single-binary developer CLI that wraps the Aleo toolchain (`leo`, and
 eventually `snarkOS`) into one consistent workflow: scaffold, build, test,
-audit, deploy, and generate TypeScript bindings for Aleo programs.
+audit, deploy, generate TypeScript bindings, manage accounts, query on-chain
+state, and run diagnostics — all from one command.
 
 Built for the **Aleo Hackathon 2026 — Infrastructure & Developer Tools
 track**.
@@ -10,8 +11,9 @@ track**.
 AleoFlow does not reimplement Leo's compiler or the Aleo network client.
 It wraps the official `leo` CLI and adds the parts that are missing from
 day-to-day developer workflow: project scaffolding with real templates, a
-lightweight privacy linter, and TypeScript client stub generation from a
-compiled program's ABI.
+lightweight privacy linter, TypeScript client stub generation from a
+compiled program's ABI, best-effort error translation for known failure
+patterns, and environment diagnostics.
 
 ## Why
 
@@ -32,9 +34,11 @@ underlying compiler or network logic.
   cargo binstall leo-lang
   ```
   Verify with `leo --version`.
-- **snarkOS** — only required for the `devnet` command (local test
-  network). Install via `leo devnet --install` the first time you run
-  `aleoflow devnet`.
+- **leo-fmt** — only required for the `fmt` command. Install from
+  <https://github.com/AleoHQ/leo-fmt>.
+- **snarkOS** — only required for the `devnet` and `records list` commands
+  (local test network / record scanning). Install via
+  `leo devnet --install` the first time you run `aleoflow devnet`.
 
 ## Install
 
@@ -84,6 +88,7 @@ cd my-app
 aleoflow build
 aleoflow test
 aleoflow audit .
+aleoflow run main
 ```
 
 ## Workflow
@@ -108,9 +113,11 @@ flowchart LR
 ```
 
 Each stage wraps a real underlying tool rather than reinventing it —
-`build`/`test`/`deploy`/`devnet` shell out to the official `leo` binary,
-`audit` and `bindings` are AleoFlow-native additions that fill gaps the
-official toolchain doesn't cover.
+`build`/`test`/`deploy`/`devnet`/`run`/`execute`/`fmt`/`account`/`query` shell
+out to the official `leo` binary; `audit` and `bindings` are AleoFlow-native
+additions that fill gaps the official toolchain doesn't cover; `doctor`
+checks the local development environment; `records list` shells out to
+`snarkOS`.
 
 ### Deploy safety flow
 
@@ -138,7 +145,9 @@ system on top of it.
 
 ## Commands
 
-### `aleoflow init <name> --template <template>`
+AleoFlow provides 14 top-level commands. The section below covers each one.
+
+### `aleoflow init <name> [--template <template>] [--workspace <members>]`
 
 Scaffolds a new Aleo project from a built-in template. Templates:
 
@@ -147,6 +156,9 @@ Scaffolds a new Aleo project from a built-in template. Templates:
 - `ai-agent` — simple agent state record + inference stub
 - `gamefi` — player state / score submission record
 
+When `--template` is omitted, AleoFlow uses `aleo.toml`'s `default_template`
+setting, or falls back to `payment`.
+
 Project names containing hyphens are automatically sanitized to
 underscores for the generated Aleo program ID (Aleo program identifiers
 cannot contain hyphens), while the folder name stays exactly as typed.
@@ -154,6 +166,30 @@ cannot contain hyphens), while the folder name stays exactly as typed.
 ```
 aleoflow init my-voting-app --template defi
 ```
+
+#### Workspace mode (`--workspace`)
+
+Pass a comma-separated list of member names to scaffold a multi-package
+workspace root instead of a single project. Creates a `workspace.json` file
+at the root listing all members, then scaffolds each member as a separate
+subdirectory with the same template.
+
+```
+aleoflow init my-mono --template payment --workspace token,governance,treasury
+```
+
+This produces:
+
+```
+my-mono/
+  workspace.json          # {"members": ["token", "governance", "treasury"]}
+  token/                  # scaffolded from payment template
+  governance/             # scaffolded from payment template
+  treasury/               # scaffolded from payment template
+```
+
+Use `aleoflow deploy --path my-mono --package <name>` or `--all` to deploy
+workspace members (see deploy section).
 
 ### `aleoflow build [--path <path>] [--json-output[=<file>]]`
 
@@ -172,6 +208,77 @@ Wraps `leo test`.
 aleoflow test --path my-app
 ```
 
+### `aleoflow fmt [--path <path>]`
+
+Wraps `leo fmt` to format your Leo source files using `leo-fmt`. Requires
+`leo-fmt` on PATH (install from
+<https://github.com/AleoHQ/leo-fmt>).
+
+```
+aleoflow fmt --path my-app
+```
+
+### `aleoflow run <name> [inputs...] [--path <path>] [--network <network>] [--endpoint <url>] [--json-output[=<file>]]`
+
+Locally executes a Leo transition or function in dry-run mode — compiles and
+runs it against the AVM simulator without sending any on-chain transaction.
+
+`<name>` defaults to `"main"` if omitted. Inputs are passed as raw Leo literal
+strings (e.g. `1u64`, `aleo1...`, `true`).
+
+```
+aleoflow run transfer 100u64 aleo1recipient...
+aleoflow run main                                    # runs the default "main" function with no inputs
+```
+
+#### Best-effort error translation
+
+When `leo run` fails with a known error pattern, AleoFlow prints an
+additional friendly summary **after** leo's raw output, translating low-level
+AVM register names back to the source-level parameter names it parsed from
+your `.leo` file:
+
+```
+Error [ECLI0377045]: Failed to evaluate program: Stack evaluation failed:
+Instruction (assert.neq r0 0u64;) at index 0 failed: 'assert.neq' failed:
+'0u64' is equal to '0u64' (should not be equal)
+
+[aleoflow] Assertion failed: expected 'amount' to not equal 0u64, but it was 0u64.
+[aleoflow] This is a best-effort translation of the raw AVM error above
+         -- always check the full output if this doesn't match what you expect.
+```
+
+> [!IMPORTANT]
+> This is **best-effort** and pattern-based — it handles the confirmed
+> error formats listed below. For any error that doesn't match a known
+> pattern, AleoFlow prints nothing extra; leo's own raw output is always
+> shown in full.
+>
+> **Currently translated patterns:**
+> - Assertion failures (`assert.neq` / `assert.eq`): register mapped to source
+>   parameter name via leo_param_names parser
+> - `PRIVATE_KEY` missing from environment: suggests `aleoflow account new`
+> - Insufficient balance for fee: recommends funding the account
+> - Connection refused on endpoint: suggests checking the endpoint URL
+> - Invalid/missing Leo project path: suggests using `--path`
+
+### `aleoflow execute <name> [inputs...] [--broadcast] [--path <path>] [--network <network>] [--endpoint <url>] [--json-output[=<file>]]`
+
+Executes a Leo transition or function. Runs in **dry-run mode** by default
+(no transaction sent) — pass `--broadcast` to actually submit the execution
+transaction to the network.
+
+```
+aleoflow execute transfer 100u64 aleo1recipient...      # dry run
+aleoflow execute transfer 100u64 aleo1recipient... --broadcast   # real tx
+```
+
+Executing on `mainnet` with `--broadcast` prints an explicit warning before
+proceeding, matching the same safety convention as `deploy`.
+
+Same best-effort error translation as `run` applies — see the run section
+for details.
+
 ### `aleoflow audit <path>`
 
 A heuristic static linter for Leo source files — **not** a formal verifier. Checks include:
@@ -186,7 +293,7 @@ A heuristic static linter for Leo source files — **not** a formal verifier. Ch
 aleoflow audit ./my-app
 ```
 
-### `aleoflow deploy --path <path> --network <testnet|mainnet|canary> [--broadcast] [--endpoint <url>] [--json-output[=<file>]]`
+### `aleoflow deploy --path <path> [--network <network>] [--broadcast] [--endpoint <url>] [--json-output[=<file>]] [--package <name> | --all]`
 
 Wraps `leo deploy`. Runs in **dry-run mode by default** — it compiles and
 prepares the deployment but does not broadcast anything unless
@@ -213,7 +320,23 @@ aleoflow deploy --path my-app --network testnet --broadcast --endpoint http://lo
 
 Deployment requires a funded account. See **Deploying for real** below.
 
-### `aleoflow devnet [--path <path>] [--network <network>]`
+#### Workspace deployment
+
+When `--path` points to a workspace root (a directory containing
+`workspace.json`), deploy accepts workspace-specific flags:
+
+```
+# Deploy a single workspace member
+aleoflow deploy --path my-mono --package token --network testnet --broadcast
+
+# Deploy all workspace members sequentially
+aleoflow deploy --path my-mono --all --network testnet --broadcast
+```
+
+Workspace mode requires either `--package <name>` or `--all`. Using neither
+prints an error listing available members.
+
+### `aleoflow devnet [--path <path>] [--network <network>] [--endpoint <url>] [--json-output[=<file>]]`
 
 Wraps `leo devnet` to start a local Aleo development network. Requires
 snarkOS; if it isn't installed, AleoFlow will tell you to run
@@ -224,7 +347,10 @@ and must be built/installed separately).
 aleoflow devnet --path my-app
 ```
 
-### `aleoflow bindings <path> [--output <file>]`
+Supports `--network` and `--endpoint` for connecting the devnet to a specific
+network or RPC endpoint.
+
+### `aleoflow bindings <path> [--output <file>] [--remote <program_id>]`
 
 Generates TypeScript client stubs from a compiled program's ABI
 (`build/<program_id>/abi.json`, produced by `leo build`). If the ABI
@@ -234,10 +360,26 @@ Parameter names are pulled from the `.leo` source directly, since Leo's
 ABI JSON does not currently preserve them. Output defaults to
 `<path>/bindings/<program_name>.ts`.
 
-Generates real, working `@provablehq/sdk` execution calls via `buildExecutionTransaction`. It requires the caller to set the `PRIVATE_KEY` and `ALEO_ENDPOINT` environment variables, and automatically handles `initializeWasm()` under the hood. All execution functions return a `{ success: true, txId } | { success: false, error }` result shape. Any record-typed parameters are left as a marked `TODO` rather than guessing at the structure conversion.
+Generates real, working `@provablehq/sdk` execution calls via
+`buildExecutionTransaction`. It requires the caller to set the `PRIVATE_KEY`
+and `ALEO_ENDPOINT` environment variables, and automatically handles
+`initializeWasm()` under the hood. All execution functions return a
+`{ success: true, txId } | { success: false, error }` result shape. Any
+record-typed parameters are left as a marked `TODO` rather than guessing
+at the structure conversion.
 
 ```
 aleoflow bindings my-app
+```
+
+#### Remote bindings
+
+Pass `--remote <program_id>` to generate bindings for a program that is
+deployed on-chain, without needing a local Leo project. This fetches the
+compiled program and its ABI from the network.
+
+```
+aleoflow bindings --remote credits.aleo --network testnet
 ```
 
 ### `aleoflow records list --view-key <key> --end <height> [--start <height>] [--endpoint <url>]`
@@ -257,6 +399,156 @@ If snarkOS is not installed, AleoFlow will guide you to install it via `leo devn
 Example:
 ```
 aleoflow records list --view-key AViewKey1... --end 1000
+```
+
+### `aleoflow doctor`
+
+Diagnoses the local Aleo development environment and prints a summary of
+pass/warn/fail checks. No arguments needed — just run it:
+
+```
+aleoflow doctor
+```
+
+**What it checks:**
+1. **Rust toolchain** — `rustc` and `cargo` present and on PATH
+2. **Windows-specific** — GNU vs MSVC toolchain, `dlltool`, `LIBCLANG_PATH`
+3. **Leo** — the `leo` CLI is installed and reachable
+4. **snarkOS** — present on PATH (warn-only; snarkOS is optional)
+5. **leo-fmt** — present on PATH (warn-only; leo-fmt is optional)
+6. **Environment variables** — `PRIVATE_KEY`, `NETWORK`, `ENDPOINT` set/unset
+   (checks presence only; never prints or logs their values)
+
+Each check shows a `[done]`, `[warning]`, or `[error]` status with an
+actionable message when something is wrong. The summary line reports the
+total pass/warn/fail count, and the command exits with a non-zero code if
+any critical checks failed.
+
+> [!NOTE]
+> `doctor` checks tool availability and environment setup — it does not
+> validate Leo project structure, verify on-chain connectivity, or test
+> account balances. It is a quick environment sanity check, not a
+> comprehensive system audit.
+
+### `aleoflow account`
+
+Manage Aleo accounts: generate, import, sign, verify, and decrypt. All
+subcommands wrap the corresponding `leo account` functionality.
+
+#### `aleoflow account new [--seed <n>] [--write] [--discreet] [--network <name>] [--endpoint <url>]`
+
+Generate a new Aleo account. Optionally seed the RNG for reproducibility,
+write the private key to `.env`, or print to an alternate screen for
+security.
+
+```
+aleoflow account new
+aleoflow account new --seed 42 --write --network testnet
+```
+
+#### `aleoflow account import [<private_key>] [--write] [--discreet] [--network <name>] [--endpoint <url>]`
+
+Derive an Aleo account from an existing private key. If omitted, prompts
+interactively.
+
+```
+aleoflow account import APrivateKey1...
+aleoflow account import --write
+```
+
+#### `aleoflow account sign --message <aleo_value> [--private-key <key>] [--private-key-file <path>] [--raw]`
+
+Sign a message (Aleo value) using your Aleo private key. Use `--raw` to
+sign the message as raw bytes instead of Aleo literal parsing.
+
+```
+aleoflow account sign --message 1u64
+aleoflow account sign --message "hello" --private-key APrivateKey1... --raw
+```
+
+#### `aleoflow account verify --address <addr> --signature <sig> --message <msg> [--raw]`
+
+Verify a message signature against an Aleo address.
+
+```
+aleoflow account verify \
+    --address aleo1... \
+    --signature sign1... \
+    --message 1u64
+```
+
+#### `aleoflow account decrypt --ciphertext <ctext> [-k <key>] [-f <key_file>]`
+
+Decrypt a record ciphertext using your Aleo private key or view key.
+
+```
+aleoflow account decrypt --ciphertext record1... -k APrivateKey1...
+```
+
+### `aleoflow query`
+
+Query Aleo network state. All subcommands wrap `leo query` and support
+`--network`, `--endpoint`, and `--json-output`.
+
+Default endpoint when none is specified:
+`https://api.explorer.provable.com/v1`
+
+```
+aleoflow query block --latest
+aleoflow query transaction at1...
+aleoflow query program credits.aleo --mappings
+aleoflow query stateroot
+aleoflow query committee
+```
+
+#### `aleoflow query block [<id>] [--latest] [--latest-hash] [--latest-height] [--range <start> <end>] [--transactions] [--to-height] [--network <network>] [--endpoint <url>] [--json-output[=<file>]]`
+
+Query a block by height, hash, or range (max 50 per range request). If no
+block identifier is given, must use one of `--latest`, `--latest-hash`,
+`--latest-height`, or `--range`.
+
+```
+aleoflow query block 1000
+aleoflow query block --latest
+aleoflow query block --latest-hash
+aleoflow query block --range 100 150 --transactions
+```
+
+#### `aleoflow query transaction [<id>] [--confirmed] [--unconfirmed] [--from-io <id>] [--from-transition <id>] [--from-program <name>] [--network <network>] [--endpoint <url>] [--json-output[=<file>]]`
+
+Query a transaction by ID, or filter by program IO, transition ID, or
+program name. If no transaction ID is given, must use one of the `--from-*`
+flags.
+
+```
+aleoflow query transaction at1...
+aleoflow query transaction --from-program credits.aleo
+```
+
+#### `aleoflow query program <name> [--edition <n>] [--mappings] [--mapping-value <name> <key>] [--network <network>] [--endpoint <url>] [--json-output[=<file>]]`
+
+Query a deployed program's structure or mapping values.
+
+```
+aleoflow query program credits.aleo
+aleoflow query program credits.aleo --mappings
+aleoflow query program credits.aleo --mapping-value account_map aleo1...
+```
+
+#### `aleoflow query stateroot [--network <network>] [--endpoint <url>] [--json-output[=<file>]]`
+
+Query the current state root.
+
+```
+aleoflow query stateroot
+```
+
+#### `aleoflow query committee [--network <network>] [--endpoint <url>] [--json-output[=<file>]]`
+
+Query the current committee information.
+
+```
+aleoflow query committee
 ```
 
 ## Proof of deployment
@@ -313,10 +605,11 @@ it with `aleoflow deploy ... --endpoint http://localhost:3030`.
 
 ## `--json-output` and CI use
 
-`build`, `test`, `deploy`, and `devnet` all support `--json-output`,
-forwarded directly to `leo`. This is intended for scripting and CI
-pipelines rather than interactive use — passing it suppresses the normal
-colored progress output in favor of a structured JSON result file.
+`build`, `test`, `deploy`, `devnet`, `run`, `execute`, and `query` all
+support `--json-output`, forwarded directly to `leo`. This is intended
+for scripting and CI pipelines rather than interactive use — passing it
+suppresses the normal colored progress output in favor of a structured
+JSON result file.
 
 ```
 aleoflow build --path my-app --json-output
@@ -334,12 +627,52 @@ default_template = "payment"
 ```
 
 - `default_template` — used by `init` when `--template` is omitted
-- `default_network` — used by `deploy` and `devnet` when `--network` is
-  omitted
+- `default_network` — used by `deploy`, `devnet`, `run`, `execute`, and
+  `query` commands when `--network` is omitted
 
 If the file is missing, malformed, or simply not present, AleoFlow falls
 back to its built-in defaults and continues normally — a broken or
 absent `aleo.toml` never blocks the CLI.
+
+### Named profiles (`[profiles.<name>]`)
+
+Define named endpoint/network presets under `[profiles]` and reference them
+with the `--profile` flag. This is useful when you switch between multiple
+environments (e.g. local devnet vs. public testnet).
+
+```toml
+[profiles.local]
+endpoint = "http://localhost:3030"
+network = "testnet"
+
+[profiles.mainnet]
+endpoint = "https://api.explorer.provable.com/v1"
+network = "mainnet"
+```
+
+```
+aleoflow deploy --path my-app --profile local --broadcast
+aleoflow run transfer 1u64 --profile mainnet
+```
+
+**Precedence order** (most to least specific):
+
+1. **Explicit CLI flags** (`--network`, `--endpoint`)
+2. **Named profile** (`--profile <name>` from `aleo.toml`'s
+   `[profiles.<name>]` section)
+3. **Config file defaults** (`default_network` at the top level of
+   `aleo.toml`)
+4. **Built-in hardcoded defaults** (e.g. Testnet for deploy)
+
+If the profile name does not exist, AleoFlow prints a clear error listing
+all available profiles.
+
+Profiles are available on: `deploy`, `devnet`, `run`, `execute`, `query`,
+and `records list`.
+
+> [!IMPORTANT]
+> Never store private keys in `aleo.toml`. Use `.env` files or shell
+> environment variables for secrets.
 
 ## Quiet mode
 
@@ -359,8 +692,25 @@ suppressed — only informational status lines are silenced.
 - It does not re-implement Leo's compiler, the ZK proving system, or
   snarkOS's networking logic — all of that is handled by the official
   `leo` and `snarkOS` binaries, which AleoFlow wraps.
-- `audit` is a heuristic static linter and not a formal verifier; its data-flow checks are shallow/single-hop and do not replace a comprehensive, manual security audit.
-- `bindings` leaves complex record-typed parameter conversions as marked `TODO`s rather than automatically generating conversion logic for them.
+- `audit` is a heuristic static linter and not a formal verifier; its
+  data-flow checks are shallow/single-hop and do not replace a
+  comprehensive, manual security audit.
+- `bindings` leaves complex record-typed parameter conversions as marked
+  `TODO`s rather than automatically generating conversion logic for them.
+- `run` and `execute` error translation is best-effort and
+  pattern-based — it handles only the confirmed error formats listed in
+  the run section. Unrecognized errors pass through unchanged (leo's raw
+  output is always shown in full). The translation is not a general-purpose
+  debugger and does not provide stack traces, register state dumps, or
+  program execution traces.
+- `doctor` checks tool availability and environment setup only — it does
+  not validate project structure, verify on-chain connectivity, or test
+  account balances.
+- `records list` does **not** work against the public testnet API (that
+  endpoint blocks the required RPC method). It requires a locally running
+  snarkOS node.
+- `fmt` requires `leo-fmt` to be installed separately (not bundled with
+  AleoFlow). Run `aleoflow doctor` to check if it is available.
 
 ## License
 
