@@ -1,7 +1,7 @@
 # AleoFlow
 
-A single-binary developer CLI that wraps the Aleo toolchain (`leo`, and
-eventually `snarkOS`) into one consistent workflow: scaffold, build, test,
+A single-binary developer CLI that wraps the Aleo toolchain (`leo` and
+`snarkOS`) into one consistent workflow: scaffold, build, test,
 audit, deploy, generate TypeScript bindings, manage accounts, query on-chain
 state, and run diagnostics — all from one command.
 
