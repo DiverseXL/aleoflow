@@ -528,6 +528,72 @@ mod tests {
             ]
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Doctor: doctor_check and CheckCounts
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_doctor_check_increments_pass() {
+        let mut counts = CheckCounts::default();
+        doctor_check("test-pass", "pass", "all good", &mut counts);
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.passed, 1);
+        assert_eq!(counts.warned, 0);
+        assert_eq!(counts.failed, 0);
+    }
+
+    #[test]
+    fn test_doctor_check_increments_warn() {
+        let mut counts = CheckCounts::default();
+        doctor_check("test-warn", "warn", "something odd", &mut counts);
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.passed, 0);
+        assert_eq!(counts.warned, 1);
+        assert_eq!(counts.failed, 0);
+    }
+
+    #[test]
+    fn test_doctor_check_increments_fail() {
+        let mut counts = CheckCounts::default();
+        doctor_check("test-fail", "fail", "something bad", &mut counts);
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.passed, 0);
+        assert_eq!(counts.warned, 0);
+        assert_eq!(counts.failed, 1);
+    }
+
+    #[test]
+    fn test_doctor_check_mixed_counts() {
+        let mut counts = CheckCounts::default();
+        doctor_check("p1", "pass", "", &mut counts);
+        doctor_check("w1", "warn", "", &mut counts);
+        doctor_check("f1", "fail", "", &mut counts);
+        doctor_check("p2", "pass", "", &mut counts);
+        assert_eq!(counts.total, 4);
+        assert_eq!(counts.passed, 2);
+        assert_eq!(counts.warned, 1);
+        assert_eq!(counts.failed, 1);
+    }
+
+    #[test]
+    fn test_doctor_check_unknown_severity_treated_as_fail() {
+        let mut counts = CheckCounts::default();
+        doctor_check("unknown", "unknown", "test fallback", &mut counts);
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.passed, 0);
+        assert_eq!(counts.warned, 0);
+        assert_eq!(counts.failed, 1);
+    }
+
+    #[test]
+    fn test_check_counts_default_is_zero() {
+        let counts = CheckCounts::default();
+        assert_eq!(counts.total, 0);
+        assert_eq!(counts.passed, 0);
+        assert_eq!(counts.warned, 0);
+        assert_eq!(counts.failed, 0);
+    }
 }
 
 
@@ -568,6 +634,11 @@ enum Commands {
     /// Scan, list, and manage Aleo records via snarkOS
     #[command(subcommand)]
     Records(RecordsCmd),
+    /// Diagnose the local Aleo development environment
+    Doctor(DoctorArgs),
+    /// Manage Aleo accounts: generate, import, sign, verify, and decrypt
+    #[command(subcommand)]
+    Account(AccountCmd),
 }
 
 #[derive(Subcommand)]
@@ -735,6 +806,111 @@ struct ExecuteArgs {
     json_output: Option<Option<PathBuf>>,
 }
 
+#[derive(Args)]
+struct DoctorArgs {
+    // No arguments needed; doctor diagnoses the environment automatically.
+}
+
+// ---------------------------------------------------------------------------
+// Account command: nested subcommands mirroring the RecordsCmd pattern
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum AccountCmd {
+    /// Generate a new Aleo account (optionally with a seed)
+    New(AccountNewArgs),
+    /// Derive an Aleo account from a private key
+    Import(AccountImportArgs),
+    /// Sign a message using your Aleo private key
+    Sign(AccountSignArgs),
+    /// Verify a message from an Aleo address
+    Verify(AccountVerifyArgs),
+    /// Decrypt record ciphertext using your Aleo private key or view key
+    Decrypt(AccountDecryptArgs),
+}
+
+#[derive(Args)]
+struct AccountNewArgs {
+    /// Seed the RNG with a numeric value
+    #[arg(short = 's', long)]
+    seed: Option<u64>,
+    /// Write the private key to the .env file in the current directory
+    #[arg(short = 'w', long)]
+    write: bool,
+    /// Print sensitive information discreetly to an alternate screen
+    #[arg(long)]
+    discreet: bool,
+    /// Name of the network to use
+    #[arg(short = 'n', long, default_value = "testnet")]
+    network: String,
+    /// Endpoint to record in the generated .env file (only used with --write)
+    #[arg(short = 'e', long)]
+    endpoint: Option<String>,
+}
+
+#[derive(Args)]
+struct AccountImportArgs {
+    /// Private key plaintext (omit for interactive prompt)
+    private_key: Option<String>,
+    /// Write the private key to the .env file in the current directory
+    #[arg(short = 'w', long)]
+    write: bool,
+    /// Print sensitive information discreetly to an alternate screen
+    #[arg(long)]
+    discreet: bool,
+    /// Name of the network to use
+    #[arg(short = 'n', long, default_value = "testnet")]
+    network: String,
+    /// Endpoint to record in the generated .env file (only used with --write)
+    #[arg(short = 'e', long)]
+    endpoint: Option<String>,
+}
+
+#[derive(Args)]
+struct AccountSignArgs {
+    /// Message (Aleo value) to sign
+    #[arg(short = 'm', long)]
+    message: String,
+    /// Specify the account private key
+    #[arg(long)]
+    private_key: Option<String>,
+    /// Specify the path to a file containing the account private key
+    #[arg(long)]
+    private_key_file: Option<PathBuf>,
+    /// When enabled, parses the message as bytes instead of Aleo literals
+    #[arg(short = 'r', long)]
+    raw: bool,
+}
+
+#[derive(Args)]
+struct AccountVerifyArgs {
+    /// Address to use for verification
+    #[arg(short = 'a', long)]
+    address: String,
+    /// Signature to verify
+    #[arg(short = 's', long)]
+    signature: String,
+    /// Message (Aleo value) to verify the signature against
+    #[arg(short = 'm', long)]
+    message: String,
+    /// When enabled, parses the message as bytes instead of Aleo literals
+    #[arg(short = 'r', long)]
+    raw: bool,
+}
+
+#[derive(Args)]
+struct AccountDecryptArgs {
+    /// The ciphertext to decrypt
+    #[arg(short = 'c', long)]
+    ciphertext: String,
+    /// Private key or view key to use for decryption
+    #[arg(short = 'k')]
+    key: Option<String>,
+    /// Path to a file containing the private key or view key
+    #[arg(short = 'f')]
+    key_file: Option<PathBuf>,
+}
+
 #[derive(clap::ValueEnum, Clone)]
 enum Template {
     Payment,
@@ -766,6 +942,8 @@ fn main() -> Result<()> {
         Commands::Run(args) => handle_run(args, quiet),
         Commands::Execute(args) => handle_execute(args, quiet),
         Commands::Records(cmd) => handle_records(cmd, quiet),
+        Commands::Doctor(args) => handle_doctor(args, quiet),
+        Commands::Account(cmd) => handle_account(cmd, quiet),
     }
 }
 
@@ -965,7 +1143,186 @@ fn handle_fmt(args: &FmtArgs, quiet: bool) -> Result<()> {
     leo_cmd::run_leo_with("fmt", &[], dir)
 }
 
+/// Print a single diagnostic check result with the appropriate color tag.
+/// Increments the corresponding counter in `counts`.
+fn doctor_check(
+    label: &str,
+    severity: &str, // "pass", "warn", or "fail"
+    msg: &str,
+    counts: &mut CheckCounts,
+) {
+    counts.total += 1;
+    match severity {
+        "pass" => {
+            println!("{} {}: {}", "[done]".green().bold(), label, msg);
+            counts.passed += 1;
+        }
+        "warn" => {
+            println!("{} {}: {}", "[warning]".yellow().bold(), label, msg);
+            counts.warned += 1;
+        }
+        _ => {
+            println!("{} {}: {}", "[error]".red().bold(), label, msg);
+            counts.failed += 1;
+        }
+    }
+}
+
+/// Capture the stdout of a command as a trimmed string, or return a default.
+fn cmd_version_output(cmd: &str, args: &[&str]) -> String {
+    std::process::Command::new(cmd)
+        .args(args)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// Tracks diagnostic check counts.
+#[derive(Default)]
+struct CheckCounts {
+    total: u32,
+    passed: u32,
+    warned: u32,
+    failed: u32,
+}
+
+fn handle_doctor(_args: &DoctorArgs, _quiet: bool) -> Result<()> {
+    let mut counts = CheckCounts::default();
+
+    // 1. Rust toolchain -- single invocation to check + capture output
+    let rustc_ver = cmd_version_output("rustc", &["--version"]);
+    if rustc_ver.is_empty() {
+        doctor_check("rustc", "fail", "not found on PATH. Install from https://rustup.rs", &mut counts);
+    } else {
+        doctor_check("rustc", "pass", &rustc_ver, &mut counts);
+    }
+
+    let cargo_ver = cmd_version_output("cargo", &["--version"]);
+    if cargo_ver.is_empty() {
+        doctor_check("cargo", "fail", "not found on PATH. Install from https://rustup.rs", &mut counts);
+    } else {
+        doctor_check("cargo", "pass", &cargo_ver, &mut counts);
+    }
+
+    // 2. Windows-only: GNU vs MSVC check, dlltool, LIBCLANG_PATH
+    if cfg!(windows) {
+        let rustup_host = std::process::Command::new("rustup")
+            .args(["show", "default-host"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+
+        match rustup_host {
+            Some(ref host) if host.contains("msvc") => {
+                doctor_check("rustup toolchain", "warn", &format!("MSVC toolchain active ({}) -- GNU recommended for Aleo development", host), &mut counts);
+            }
+            Some(ref host) if host.contains("gnu") => {
+                doctor_check("rustup toolchain", "pass", &format!("GNU toolchain active ({})", host), &mut counts);
+                // Only check dlltool with GNU toolchain
+                let dlltool_ver = cmd_version_output("dlltool", &["--version"]);
+                if dlltool_ver.is_empty() {
+                    doctor_check("dlltool", "warn", "not found on PATH -- may be needed for linking", &mut counts);
+                } else {
+                    doctor_check("dlltool", "pass", "found on PATH", &mut counts);
+                }
+            }
+            Some(ref host) => {
+                doctor_check("rustup toolchain", "pass", &format!("active ({})", host), &mut counts);
+            }
+            None => {
+                doctor_check("rustup", "warn", "could not determine default toolchain", &mut counts);
+            }
+        }
+
+        // LIBCLANG_PATH check
+        let clang_path = std::env::var("LIBCLANG_PATH");
+        match clang_path {
+            Ok(ref path) if !path.is_empty() && std::path::Path::new(path).exists() => {
+                doctor_check("LIBCLANG_PATH", "pass", "set and points to an existing directory", &mut counts);
+            }
+            Ok(ref path) if !path.is_empty() => {
+                doctor_check("LIBCLANG_PATH", "warn", &format!("set to '{}' but path does not exist", path), &mut counts);
+            }
+            _ => {
+                doctor_check("LIBCLANG_PATH", "warn", "not set. Install LLVM with: winget install LLVM.LLVM", &mut counts);
+            }
+        }
+    }
+
+    // 3. leo
+    let leo_ver = cmd_version_output("leo", &["--version"]);
+    if leo_ver.is_empty() {
+        doctor_check("leo", "fail", "not found on PATH. Install with: cargo binstall leo-lang or from https://github.com/AleoHQ/leo", &mut counts);
+    } else {
+        doctor_check("leo", "pass", &leo_ver, &mut counts);
+    }
+
+    // 4. snarkos (optional -- warn only)
+    let snarkos_ver = cmd_version_output("snarkos", &["--version"]);
+    if snarkos_ver.is_empty() {
+        doctor_check("snarkos", "warn", "not found on PATH (optional, required for local record scanning and devnet)", &mut counts);
+    } else {
+        doctor_check("snarkos", "pass", &snarkos_ver, &mut counts);
+    }
+
+    // 5. leo-fmt
+    if leo_cmd::leo_fmt_is_installed() {
+        doctor_check("leo-fmt", "pass", "found on PATH", &mut counts);
+    } else {
+        doctor_check("leo-fmt", "warn", "not found on PATH (optional, used by 'aleoflow fmt'). Install from https://github.com/AleoHQ/leo-fmt", &mut counts);
+    }
+
+    // 6. Environment variables (set/unset only -- never print values)
+    let pk_set = std::env::var("PRIVATE_KEY").is_ok();
+    let net_set = std::env::var("NETWORK").is_ok();
+    let ep_set = std::env::var("ENDPOINT").is_ok();
+
+    doctor_check("PRIVATE_KEY", if pk_set { "pass" } else { "warn" }, if pk_set { "set" } else { "not set" }, &mut counts);
+    doctor_check("NETWORK", if net_set { "pass" } else { "warn" }, if net_set { "set" } else { "not set" }, &mut counts);
+    doctor_check("ENDPOINT", if ep_set { "pass" } else { "warn" }, if ep_set { "set" } else { "not set" }, &mut counts);
+
+    // 7. Summary
+    println!();
+    println!(
+        "{} {} checks run, {} passed, {} warned, {} failed",
+        if counts.failed > 0 { "[error]".red().bold() } else { "[done]".green().bold() },
+        counts.total,
+        counts.passed,
+        counts.warned,
+        counts.failed
+    );
+
+    if counts.failed > 0 {
+        bail!("Some checks failed. Review the [error] items above and fix them before proceeding.");
+    }
+    if counts.warned > 0 {
+        println!(
+            "{} All critical checks passed ({} warnings -- review if needed).",
+            "[done]".green().bold(),
+            counts.warned
+        );
+    } else {
+        println!("{} All checks passed.", "[done]".green().bold());
+    }
+
+    Ok(())
+}
+
 fn handle_devnet(args: &DevnetArgs, quiet: bool) -> Result<()> {
+
     if !leo_cmd::leo_is_installed() {
         bail!(
             "leo is not installed or not on PATH. Install it with: cargo binstall leo-lang"
@@ -1251,6 +1608,165 @@ fn handle_records(cmd: &RecordsCmd, quiet: bool) -> Result<()> {
     match cmd {
         RecordsCmd::List(args) => handle_records_list(args, quiet),
     }
+}
+
+fn handle_account(cmd: &AccountCmd, quiet: bool) -> Result<()> {
+    match cmd {
+        AccountCmd::New(args) => handle_account_new(args, quiet),
+        AccountCmd::Import(args) => handle_account_import(args, quiet),
+        AccountCmd::Sign(args) => handle_account_sign(args, quiet),
+        AccountCmd::Verify(args) => handle_account_verify(args, quiet),
+        AccountCmd::Decrypt(args) => handle_account_decrypt(args, quiet),
+    }
+}
+
+fn handle_account_new(args: &AccountNewArgs, quiet: bool) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    let mut cmd = std::process::Command::new("leo");
+    cmd.args(["account", "new"]);
+
+    if let Some(seed) = args.seed {
+        cmd.args(["--seed", &seed.to_string()]);
+    }
+    if args.write {
+        cmd.arg("--write");
+    }
+    if args.discreet {
+        cmd.arg("--discreet");
+    }
+    cmd.args(["--network", &args.network]);
+    if let Some(ref endpoint) = args.endpoint {
+        cmd.args(["--endpoint", endpoint]);
+    }
+
+    if !quiet {
+        println!("{} Generating new Aleo account...", "[info]".cyan().bold());
+    }
+
+    let status = cmd.status().with_context(|| "Failed to execute 'leo account new'")?;
+    if !status.success() {
+        bail!("'leo account new' failed with exit code {}", status.code().unwrap_or(-1));
+    }
+    Ok(())
+}
+
+fn handle_account_import(args: &AccountImportArgs, quiet: bool) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    let mut cmd = std::process::Command::new("leo");
+    cmd.args(["account", "import"]);
+
+    if let Some(ref pk) = args.private_key {
+        cmd.arg(pk);
+    }
+    if args.write {
+        cmd.arg("--write");
+    }
+    if args.discreet {
+        cmd.arg("--discreet");
+    }
+    cmd.args(["--network", &args.network]);
+    if let Some(ref endpoint) = args.endpoint {
+        cmd.args(["--endpoint", endpoint]);
+    }
+
+    if !quiet {
+        println!("{} Importing Aleo account...", "[info]".cyan().bold());
+    }
+
+    let status = cmd.status().with_context(|| "Failed to execute 'leo account import'")?;
+    if !status.success() {
+        bail!("'leo account import' failed with exit code {}", status.code().unwrap_or(-1));
+    }
+    Ok(())
+}
+
+fn handle_account_sign(args: &AccountSignArgs, quiet: bool) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    let mut cmd = std::process::Command::new("leo");
+    cmd.args(["account", "sign", "--message", &args.message]);
+
+    if let Some(ref pk) = args.private_key {
+        cmd.args(["--private-key", pk]);
+    }
+    if let Some(ref pk_file) = args.private_key_file {
+        cmd.args(["--private-key-file", &pk_file.to_string_lossy()]);
+    }
+    if args.raw {
+        cmd.arg("--raw");
+    }
+
+    if !quiet {
+        println!("{} Signing message...", "[info]".cyan().bold());
+    }
+
+    let status = cmd.status().with_context(|| "Failed to execute 'leo account sign'")?;
+    if !status.success() {
+        bail!("'leo account sign' failed with exit code {}", status.code().unwrap_or(-1));
+    }
+    Ok(())
+}
+
+fn handle_account_verify(args: &AccountVerifyArgs, quiet: bool) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    let mut cmd = std::process::Command::new("leo");
+    cmd.args([
+        "account", "verify",
+        "--address", &args.address,
+        "--signature", &args.signature,
+        "--message", &args.message,
+    ]);
+
+    if args.raw {
+        cmd.arg("--raw");
+    }
+
+    if !quiet {
+        println!("{} Verifying message signature...", "[info]".cyan().bold());
+    }
+
+    let status = cmd.status().with_context(|| "Failed to execute 'leo account verify'")?;
+    if !status.success() {
+        bail!("'leo account verify' failed with exit code {}", status.code().unwrap_or(-1));
+    }
+    Ok(())
+}
+
+fn handle_account_decrypt(args: &AccountDecryptArgs, quiet: bool) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    let mut cmd = std::process::Command::new("leo");
+    cmd.args(["account", "decrypt", "--ciphertext", &args.ciphertext]);
+
+    if let Some(ref key) = args.key {
+        cmd.args(["-k", key]);
+    }
+    if let Some(ref key_file) = args.key_file {
+        cmd.args(["-f", &key_file.to_string_lossy()]);
+    }
+
+    if !quiet {
+        println!("{} Decrypting record ciphertext...", "[info]".cyan().bold());
+    }
+
+    let status = cmd.status().with_context(|| "Failed to execute 'leo account decrypt'")?;
+    if !status.success() {
+        bail!("'leo account decrypt' failed with exit code {}", status.code().unwrap_or(-1));
+    }
+    Ok(())
 }
 
 fn handle_records_list(args: &RecordsListArgs, quiet: bool) -> Result<()> {
