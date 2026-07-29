@@ -524,6 +524,60 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Query: build_query_args
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_query_args_stateroot_no_flags() {
+        let args = build_query_args("stateroot", &[], None, None, &None);
+        assert_eq!(args, vec!["stateroot"]);
+    }
+
+    #[test]
+    fn test_build_query_args_with_network_and_endpoint() {
+        let args = build_query_args(
+            "block",
+            &["123".to_string()],
+            Some(&Network::Testnet),
+            Some("https://api.testnet.com"),
+            &None,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "block",
+                "123",
+                "--network",
+                "testnet",
+                "--endpoint",
+                "https://api.testnet.com",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_query_args_with_json_output() {
+        let jo: Option<Option<PathBuf>> = Some(None);
+        let args = build_query_args("committee", &[], None, None, &jo);
+        assert_eq!(args, vec!["committee", "--json-output"]);
+    }
+
+    #[test]
+    fn test_build_query_args_program_with_flags() {
+        let args = build_query_args(
+            "program",
+            &["credits.aleo".to_string(), "--mappings".to_string()],
+            Some(&Network::Mainnet),
+            None,
+            &None,
+        );
+        assert_eq!(
+            args,
+            vec!["program", "credits.aleo", "--mappings", "--network", "mainnet"]
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Init: name-sanitization
     // -----------------------------------------------------------------------
 
@@ -724,6 +778,9 @@ enum Commands {
     /// Manage Aleo accounts: generate, import, sign, verify, and decrypt
     #[command(subcommand)]
     Account(AccountCmd),
+    /// Query Aleo network state (block, transaction, program, stateroot, committee)
+    #[command(subcommand)]
+    Query(QueryCmd),
 }
 
 #[derive(Subcommand)]
@@ -746,6 +803,137 @@ struct RecordsListArgs {
     /// Local snarkOS endpoint URL (defaults to http://localhost:3030)
     #[arg(long)]
     endpoint: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Query command: nested subcommands mirroring the RecordsCmd pattern
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum QueryCmd {
+    /// Query a block by ID, latest, or range (max 50 per range request)
+    Block(QueryBlockArgs),
+    /// Query a transaction by ID or filters
+    Transaction(QueryTransactionArgs),
+    /// Query a deployed program's structure or mapping values
+    Program(QueryProgramArgs),
+    /// Query the current state root
+    Stateroot(QueryStaterootArgs),
+    /// Query the current committee information
+    Committee(QueryCommitteeArgs),
+}
+
+#[derive(Args)]
+struct QueryBlockArgs {
+    /// Block ID (height or hash); if omitted, uses --latest
+    id: Option<String>,
+    /// Query the latest block
+    #[arg(short = 'l', long)]
+    latest: bool,
+    /// Get the latest block hash only
+    #[arg(long)]
+    latest_hash: bool,
+    /// Get the latest block height only
+    #[arg(long)]
+    latest_height: bool,
+    /// Get consecutive blocks (max 50 per request)
+    #[arg(short = 'r', long, num_args = 2)]
+    range: Option<Vec<String>>,
+    /// Include transactions in output
+    #[arg(short = 't', long)]
+    transactions: bool,
+    /// Include the cumulative height in output
+    #[arg(long)]
+    to_height: bool,
+    /// Target network
+    #[arg(long, value_parser = clap::value_parser!(Network))]
+    network: Option<Network>,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Write command results as JSON
+    #[arg(long)]
+    json_output: Option<Option<PathBuf>>,
+}
+
+#[derive(Args)]
+struct QueryTransactionArgs {
+    /// Transaction ID; if omitted, must use one of the --from-* flags
+    id: Option<String>,
+    /// Query confirmed transactions only
+    #[arg(short = 'c', long)]
+    confirmed: bool,
+    /// Query unconfirmed transactions only
+    #[arg(short = 'u', long)]
+    unconfirmed: bool,
+    /// Filter by program IO ID
+    #[arg(long)]
+    from_io: Option<String>,
+    /// Filter by transition ID
+    #[arg(long)]
+    from_transition: Option<String>,
+    /// Filter by program name
+    #[arg(long)]
+    from_program: Option<String>,
+    /// Target network
+    #[arg(long, value_parser = clap::value_parser!(Network))]
+    network: Option<Network>,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Write command results as JSON
+    #[arg(long)]
+    json_output: Option<Option<PathBuf>>,
+}
+
+#[derive(Args)]
+struct QueryProgramArgs {
+    /// Deployed program name (e.g. credits.aleo)
+    name: String,
+    /// Program edition number
+    #[arg(long)]
+    edition: Option<u32>,
+    /// List all mapping names
+    #[arg(long)]
+    mappings: bool,
+    /// Look up a specific mapping value: --mapping-value <MAPPING> <KEY>
+    #[arg(long, num_args = 2)]
+    mapping_value: Option<Vec<String>>,
+    /// Target network
+    #[arg(long, value_parser = clap::value_parser!(Network))]
+    network: Option<Network>,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Write command results as JSON
+    #[arg(long)]
+    json_output: Option<Option<PathBuf>>,
+}
+
+#[derive(Args)]
+struct QueryStaterootArgs {
+    /// Target network
+    #[arg(long, value_parser = clap::value_parser!(Network))]
+    network: Option<Network>,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Write command results as JSON
+    #[arg(long)]
+    json_output: Option<Option<PathBuf>>,
+}
+
+#[derive(Args)]
+struct QueryCommitteeArgs {
+    /// Target network
+    #[arg(long, value_parser = clap::value_parser!(Network))]
+    network: Option<Network>,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Write command results as JSON
+    #[arg(long)]
+    json_output: Option<Option<PathBuf>>,
 }
 
 #[derive(Args)]
@@ -1030,6 +1218,7 @@ fn main() -> Result<()> {
         Commands::Records(cmd) => handle_records(cmd, quiet, profile),
         Commands::Doctor(args) => handle_doctor(args, quiet),
         Commands::Account(cmd) => handle_account(cmd, quiet),
+        Commands::Query(cmd) => handle_query(cmd, quiet, profile),
     }
 }
 
@@ -1696,6 +1885,253 @@ fn handle_records(cmd: &RecordsCmd, quiet: bool, profile: Option<&str>) -> Resul
     match cmd {
         RecordsCmd::List(args) => handle_records_list(args, quiet, profile),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Query command handlers
+// ---------------------------------------------------------------------------
+
+/// Build the argument list for `leo query <subcommand>`.
+/// Appends subcommand-specific flags, then shared --network/--endpoint/--json-output.
+fn build_query_args(
+    subcommand: &str,
+    sub_args: &[String],
+    network: Option<&Network>,
+    endpoint: Option<&str>,
+    json_output: &Option<Option<PathBuf>>,
+) -> Vec<String> {
+    let mut args = vec![subcommand.to_string()];
+    args.extend(sub_args.iter().cloned());
+
+    if let Some(net) = network {
+        let net_str = match net {
+            Network::Testnet => "testnet",
+            Network::Mainnet => "mainnet",
+            Network::Canary => "canary",
+        };
+        args.push("--network".to_string());
+        args.push(net_str.to_string());
+    }
+    if let Some(ep) = endpoint {
+        args.push("--endpoint".to_string());
+        args.push(ep.to_string());
+    }
+
+    let json_flags = leo_cmd::json_output_flag(json_output);
+    args.extend(json_flags);
+
+    args
+}
+
+fn handle_query(cmd: &QueryCmd, quiet: bool, profile: Option<&str>) -> Result<()> {
+    match cmd {
+        QueryCmd::Block(args) => handle_query_block(args, quiet, profile),
+        QueryCmd::Transaction(args) => handle_query_transaction(args, quiet, profile),
+        QueryCmd::Program(args) => handle_query_program(args, quiet, profile),
+        QueryCmd::Stateroot(args) => handle_query_stateroot(args, quiet, profile),
+        QueryCmd::Committee(args) => handle_query_committee(args, quiet, profile),
+    }
+}
+
+fn handle_query_block(args: &QueryBlockArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
+
+    let network = args.network.clone().or(profile_res.network).or_else(|| {
+        cfg.default_network.as_deref().and_then(parse_network).inspect(|n| {
+            if !quiet {
+                let name = match n {
+                    Network::Testnet => "testnet",
+                    Network::Mainnet => "mainnet",
+                    Network::Canary => "canary",
+                };
+                println!("{} Using default_network '{}' from aleo.toml", "[info]".cyan().bold(), name);
+            }
+        })
+    });
+
+    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+
+    let mut sub_args: Vec<String> = Vec::new();
+    if let Some(ref id) = args.id {
+        sub_args.push(id.clone());
+    }
+    if args.latest {
+        sub_args.push("--latest".to_string());
+    }
+    if args.latest_hash {
+        sub_args.push("--latest-hash".to_string());
+    }
+    if args.latest_height {
+        sub_args.push("--latest-height".to_string());
+    }
+    if let Some(ref range) = args.range {
+        sub_args.push("--range".to_string());
+        sub_args.extend(range.iter().cloned());
+    }
+    if args.transactions {
+        sub_args.push("--transactions".to_string());
+    }
+    if args.to_height {
+        sub_args.push("--to-height".to_string());
+    }
+
+    let extra_args = build_query_args("block", &sub_args, network.as_ref(), endpoint, &args.json_output);
+    print_info(&format!("Running 'leo query block'..."), quiet);
+    leo_cmd::run_leo_with("query", &extra_args, None)
+}
+
+fn handle_query_transaction(args: &QueryTransactionArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
+
+    let network = args.network.clone().or(profile_res.network).or_else(|| {
+        cfg.default_network.as_deref().and_then(parse_network).inspect(|n| {
+            if !quiet {
+                let name = match n {
+                    Network::Testnet => "testnet",
+                    Network::Mainnet => "mainnet",
+                    Network::Canary => "canary",
+                };
+                println!("{} Using default_network '{}' from aleo.toml", "[info]".cyan().bold(), name);
+            }
+        })
+    });
+
+    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+
+    let mut sub_args: Vec<String> = Vec::new();
+    if let Some(ref id) = args.id {
+        sub_args.push(id.clone());
+    }
+    if args.confirmed {
+        sub_args.push("--confirmed".to_string());
+    }
+    if args.unconfirmed {
+        sub_args.push("--unconfirmed".to_string());
+    }
+    if let Some(ref io) = args.from_io {
+        sub_args.push("--from-io".to_string());
+        sub_args.push(io.clone());
+    }
+    if let Some(ref tid) = args.from_transition {
+        sub_args.push("--from-transition".to_string());
+        sub_args.push(tid.clone());
+    }
+    if let Some(ref pname) = args.from_program {
+        sub_args.push("--from-program".to_string());
+        sub_args.push(pname.clone());
+    }
+
+    let extra_args = build_query_args("transaction", &sub_args, network.as_ref(), endpoint, &args.json_output);
+    print_info(&format!("Running 'leo query transaction'..."), quiet);
+    leo_cmd::run_leo_with("query", &extra_args, None)
+}
+
+fn handle_query_program(args: &QueryProgramArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
+
+    let network = args.network.clone().or(profile_res.network).or_else(|| {
+        cfg.default_network.as_deref().and_then(parse_network).inspect(|n| {
+            if !quiet {
+                let name = match n {
+                    Network::Testnet => "testnet",
+                    Network::Mainnet => "mainnet",
+                    Network::Canary => "canary",
+                };
+                println!("{} Using default_network '{}' from aleo.toml", "[info]".cyan().bold(), name);
+            }
+        })
+    });
+
+    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+
+    let mut sub_args: Vec<String> = Vec::new();
+    sub_args.push(args.name.clone());
+    if let Some(ref ed) = args.edition {
+        sub_args.push("--edition".to_string());
+        sub_args.push(ed.to_string());
+    }
+    if args.mappings {
+        sub_args.push("--mappings".to_string());
+    }
+    if let Some(ref mv) = args.mapping_value {
+        sub_args.push("--mapping-value".to_string());
+        sub_args.extend(mv.iter().cloned());
+    }
+
+    let extra_args = build_query_args("program", &sub_args, network.as_ref(), endpoint, &args.json_output);
+    print_info(&format!("Running 'leo query program'..."), quiet);
+    leo_cmd::run_leo_with("query", &extra_args, None)
+}
+
+fn handle_query_stateroot(args: &QueryStaterootArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
+
+    let network = args.network.clone().or(profile_res.network).or_else(|| {
+        cfg.default_network.as_deref().and_then(parse_network).inspect(|n| {
+            if !quiet {
+                let name = match n {
+                    Network::Testnet => "testnet",
+                    Network::Mainnet => "mainnet",
+                    Network::Canary => "canary",
+                };
+                println!("{} Using default_network '{}' from aleo.toml", "[info]".cyan().bold(), name);
+            }
+        })
+    });
+
+    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+
+    let extra_args = build_query_args("stateroot", &[], network.as_ref(), endpoint, &args.json_output);
+    print_info(&format!("Running 'leo query stateroot'..."), quiet);
+    leo_cmd::run_leo_with("query", &extra_args, None)
+}
+
+fn handle_query_committee(args: &QueryCommitteeArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
+
+    let network = args.network.clone().or(profile_res.network).or_else(|| {
+        cfg.default_network.as_deref().and_then(parse_network).inspect(|n| {
+            if !quiet {
+                let name = match n {
+                    Network::Testnet => "testnet",
+                    Network::Mainnet => "mainnet",
+                    Network::Canary => "canary",
+                };
+                println!("{} Using default_network '{}' from aleo.toml", "[info]".cyan().bold(), name);
+            }
+        })
+    });
+
+    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+
+    let extra_args = build_query_args("committee", &[], network.as_ref(), endpoint, &args.json_output);
+    print_info(&format!("Running 'leo query committee'..."), quiet);
+    leo_cmd::run_leo_with("query", &extra_args, None)
 }
 
 fn handle_account(cmd: &AccountCmd, quiet: bool) -> Result<()> {
