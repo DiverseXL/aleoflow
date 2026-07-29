@@ -592,6 +592,18 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Error translation: register_to_name
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_register_to_name_basic() {
+        // When no project dir is given, should fall back to "argument N"
+        assert_eq!(register_to_name("r0", "main", None), "argument 0");
+        assert_eq!(register_to_name("r1", "main", None), "argument 1");
+        assert_eq!(register_to_name("r2", "main", None), "argument 2");
+    }
+
+    // -----------------------------------------------------------------------
     // Run/Execute: build_leo_run_args
     // -----------------------------------------------------------------------
 
@@ -766,9 +778,11 @@ enum Commands {
     Audit(AuditArgs),
     /// Generate TypeScript bindings from a compiled Aleo program's ABI
     Bindings(BindingsArgs),
-    /// Locally execute a transition/function (dry-run, no transaction sent)
+    /// Locally execute a transition/function (dry-run, no transaction sent).
+    /// Best-effort error translation is applied to known leo failure patterns.
     Run(RunArgs),
-    /// Execute a transition/function on-chain (dry-run unless --broadcast)
+    /// Execute a transition/function on-chain (dry-run unless --broadcast).
+    /// Best-effort error translation is applied to known leo failure patterns.
     Execute(ExecuteArgs),
     /// Scan, list, and manage Aleo records via snarkOS
     #[command(subcommand)]
@@ -3002,6 +3016,199 @@ fn build_leo_run_args(
     args
 }
 
+// ---------------------------------------------------------------------------
+// Best-effort error translation for run/execute commands
+// ---------------------------------------------------------------------------
+
+/// Try to find the .leo source file for a given function name in a project
+/// directory and return the parameter names for that function.
+fn resolve_func_param_names(func_name: &str, project_dir: Option<&Path>) -> Option<Vec<String>> {
+    let search_dir = match project_dir {
+        Some(d) => d.to_path_buf(),
+        None => std::env::current_dir().ok()?,
+    };
+
+    // Look for .leo files in <project>/src/ and <project>/
+    let mut candidates = Vec::new();
+    let src_dir = search_dir.join("src");
+    if src_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&src_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "leo") {
+                    candidates.push(path);
+                }
+            }
+        }
+    }
+    // Also check the project root itself
+    if let Ok(entries) = fs::read_dir(&search_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |e| e == "leo")
+                && !candidates.contains(&path)
+            {
+                candidates.push(path);
+            }
+        }
+    }
+
+    for leo_path in &candidates {
+        let content = fs::read_to_string(leo_path).ok()?;
+        if let Some(names) = leo_param_names(&content, func_name) {
+            if !names.is_empty() {
+                return Some(names);
+            }
+        }
+    }
+    None
+}
+
+/// Map a register (e.g. "r0") to a parameter name from the source, or fall
+/// back to "argument <N>" if the source can't be parsed.
+fn register_to_name(register: &str, func_name: &str, project_dir: Option<&Path>) -> String {
+    // Parse the register number: "r0" -> 0, "r1" -> 1, etc.
+    let idx = register
+        .strip_prefix('r')
+        .and_then(|s| s.parse::<usize>().ok());
+    let idx = match idx {
+        Some(i) => i,
+        None => return format!("register {}", register),
+    };
+
+    // Try to resolve via leo source parsing
+    if let Some(param_names) = resolve_func_param_names(func_name, project_dir) {
+        if let Some(name) = param_names.get(idx) {
+            return name.clone();
+        }
+    }
+
+    format!("argument {}", idx)
+}
+
+/// Try to parse an assert.neq / assert.eq failure from captured stderr.
+/// Returns a friendly summary string if matched, None otherwise.
+fn try_translate_assert_error(stderr: &str, func_name: &str, project_dir: Option<&Path>) -> Option<String> {
+    // Expected format:
+    // Instruction (<opcode> <r#> <val>;) at index <N> failed: '<opcode>' failed: '<val1>' <comparison> '<val2>' (<expectation>)
+
+    let instr_start = stderr.find("Instruction (")?;
+    let after_instr = &stderr[instr_start + 13..]; // skip "Instruction ("
+
+    // Find the closing ";)" of the instruction
+    let paren_close = after_instr.find(";)")?;
+    let instr_body = &after_instr[..paren_close];
+
+    // Parse: <opcode> <r#> <val>
+    let parts: Vec<&str> = instr_body.split_whitespace().collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let opcode = parts[0];
+    let register = parts[1];
+    let _val1 = parts[2];
+
+    // Find "' failed: '" to locate the comparison details
+    let failed_marker = "' failed: '";
+    let failed_pos = after_instr.find(failed_marker)?;
+    let after_failed = &after_instr[failed_pos + failed_marker.len()..];
+
+    // Extract val1: it starts right after the marker until the next "'"
+    let val1_end = after_failed.find('\'')?;
+    let actual_val1 = &after_failed[..val1_end];
+
+    // Skip "' " to get the comparison phrase
+    let after_val1 = &after_failed[val1_end + 2..]; // skip "' "
+    let comparison_end = after_val1.find('\'')?;
+    let _comparison = &after_val1[..comparison_end];
+
+    // Skip "' " to get val2
+    let after_comp = &after_val1[comparison_end + 2..]; // skip "' "
+    let val2_end = after_comp.find('\'')?;
+    let actual_val2 = &after_comp[..val2_end];
+
+    // Extract expectation from the trailing (...) 
+    let paren_start = stderr.rfind('(')?;
+    let paren_end = stderr.rfind(')')?;
+    let _expectation = if paren_start < paren_end {
+        &stderr[paren_start + 1..paren_end]
+    } else {
+        ""
+    };
+
+    let param_name = register_to_name(register, func_name, project_dir);
+
+    let is_neq = opcode.contains("neq");
+    let expected_phrase = if is_neq {
+        format!("to not equal {}", actual_val2)
+    } else {
+        format!("to equal {}", actual_val2)
+    };
+
+    Some(format!(
+        "\n{} Assertion failed: expected '{}' {}, but it was {}.\
+         \n{} This is a best-effort translation of the raw AVM error above \
+         -- always check the full output if this doesn't match what you expect.\n",
+        "[aleoflow]".cyan().bold(),
+        param_name,
+        expected_phrase,
+        actual_val1,
+        "[aleoflow]".cyan().bold(),
+    ))
+}
+
+/// Best-effort translation of known leo run/execute error patterns.
+/// Prints a friendly summary block AFTER leo's raw output.
+/// Falls through silently for unrecognized patterns.
+fn translate_run_execute_error(stderr: &str, func_name: &str, project_dir: Option<&Path>) {
+    // 1. Assert.neq / assert.eq failure
+    if stderr.contains("Instruction (") && (stderr.contains("assert.neq") || stderr.contains("assert.eq")) {
+        if let Some(msg) = try_translate_assert_error(stderr, func_name, project_dir) {
+            println!("{}", msg);
+            return;
+        }
+    }
+
+    // 2. PRIVATE_KEY missing
+    if stderr.contains("Failed to load 'PRIVATE_KEY'") {
+        println!(
+            "  {} Set PRIVATE_KEY via 'aleoflow account new' or your .env file, then retry.",
+            "[aleoflow]".cyan().bold()
+        );
+        return;
+    }
+
+    // 3. Insufficient balance
+    if stderr.contains("insufficient to pay the base fee") {
+        println!(
+            "  {} The account does not have enough balance to cover the transaction fee. \
+             Fund the account or use a different key.",
+            "[aleoflow]".cyan().bold()
+        );
+        return;
+    }
+
+    // 4. Connection refused
+    if stderr.contains("Connection refused") {
+        println!(
+            "  {} Could not connect to the endpoint. Check that the endpoint URL is \
+             correct and reachable. Use --endpoint or --profile to set a different endpoint.",
+            "[aleoflow]".cyan().bold()
+        );
+        return;
+    }
+
+    // 5. Invalid project path
+    if stderr.contains("failed to load Leo project") {
+        println!(
+            "  {} The specified path does not contain a valid Leo project. \
+             Use --path to point to a directory with program.json.",
+            "[aleoflow]".cyan().bold()
+        );
+        return;
+    }
+}
+
 fn handle_run(args: &RunArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
     if !leo_cmd::leo_is_installed() {
         bail!(
@@ -3046,7 +3253,13 @@ fn handle_run(args: &RunArgs, quiet: bool, profile: Option<&str>) -> Result<()> 
     );
 
     print_info(&format!("Running 'leo run {}'...", args.name), quiet);
-    leo_cmd::run_leo_with("run", &extra_args, dir)
+
+    // Run with stderr capture for best-effort error translation
+    let (result, captured_stderr) = leo_cmd::run_leo_captured("run", &extra_args, dir);
+    if let Err(_e) = &result {
+        translate_run_execute_error(&captured_stderr, &args.name, args.path.as_deref());
+    }
+    result
 }
 
 fn handle_execute(args: &ExecuteArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
@@ -3130,7 +3343,12 @@ fn handle_execute(args: &ExecuteArgs, quiet: bool, profile: Option<&str>) -> Res
         );
     }
 
-    leo_cmd::run_leo_with("execute", &extra_args, dir)
+    // Run with stderr capture for best-effort error translation
+    let (result, captured_stderr) = leo_cmd::run_leo_captured("execute", &extra_args, dir);
+    if let Err(ref _e) = result {
+        translate_run_execute_error(&captured_stderr, &args.name, args.path.as_deref());
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
