@@ -38,13 +38,26 @@ underlying compiler or network logic.
 
 ## Install
 
-Published on crates.io — install with a single command:
+### 1. Pre-built Binaries (Simplest option for quick trial)
+
+If you don't have Rust installed, the easiest way to try AleoFlow is by downloading a pre-built binary directly from the [GitHub Releases](https://github.com/DiverseXL/aleoflow/releases/latest) page.
+
+Select the binary corresponding to your platform:
+- **Linux**: `aleoflow-linux-x86_64`
+- **macOS (Apple Silicon)**: `aleoflow-macos-arm64`
+- **Windows**: `aleoflow-windows-x86_64.exe`
+
+---
+
+If you prefer to build from source or contribute, the other installation options remain available:
+
+### 2. From crates.io
 
 ```
 cargo install aleoflow
 ```
 
-Or from source:
+### 3. From Source
 
 ```
 git clone https://github.com/DiverseXL/aleoflow
