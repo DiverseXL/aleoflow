@@ -418,6 +418,79 @@ mod tests {
         // Original folder name preserved unchanged
         assert_eq!(project_name, "my-aleo-project");
     }
+
+    // -----------------------------------------------------------------------
+    // Run/Execute: build_leo_run_args
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_leo_run_args_name_only() {
+        let args = build_leo_run_args("main", &[], None, None, &None);
+        assert_eq!(args, vec!["main"]);
+    }
+
+    #[test]
+    fn test_build_leo_run_args_with_inputs() {
+        let args = build_leo_run_args(
+            "transfer",
+            &["1u32".to_string(), "aleo1abc".to_string()],
+            None,
+            None,
+            &None,
+        );
+        assert_eq!(args, vec!["transfer", "1u32", "aleo1abc"]);
+    }
+
+    #[test]
+    fn test_build_leo_run_args_with_network() {
+        let args = build_leo_run_args(
+            "main",
+            &[],
+            Some(&Network::Testnet),
+            None,
+            &None,
+        );
+        assert_eq!(args, vec!["main", "--network", "testnet"]);
+    }
+
+    #[test]
+    fn test_build_leo_run_args_with_endpoint_and_json_output() {
+        let args = build_leo_run_args(
+            "main",
+            &[],
+            None,
+            Some("http://localhost:3030"),
+            &Some(None),
+        );
+        assert_eq!(
+            args,
+            vec!["main", "--endpoint", "http://localhost:3030", "--json-output"]
+        );
+    }
+
+    #[test]
+    fn test_build_leo_run_args_all_flags() {
+        let args = build_leo_run_args(
+            "submit",
+            &["100u64".to_string(), "aleo1xyz".to_string()],
+            Some(&Network::Mainnet),
+            Some("https://api.provable.com/v2"),
+            &Some(Some(PathBuf::from("/tmp/out.json"))),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "submit",
+                "100u64",
+                "aleo1xyz",
+                "--network",
+                "mainnet",
+                "--endpoint",
+                "https://api.provable.com/v2",
+                "--json-output=/tmp/out.json",
+            ]
+        );
+    }
 }
 
 
@@ -449,6 +522,10 @@ enum Commands {
     Audit(AuditArgs),
     /// Generate TypeScript bindings from a compiled Aleo program's ABI
     Bindings(BindingsArgs),
+    /// Locally execute a transition/function (dry-run, no transaction sent)
+    Run(RunArgs),
+    /// Execute a transition/function on-chain (dry-run unless --broadcast)
+    Execute(ExecuteArgs),
     /// Scan, list, and manage Aleo records via snarkOS
     #[command(subcommand)]
     Records(RecordsCmd),
@@ -549,6 +626,51 @@ struct BindingsArgs {
     output: Option<PathBuf>,
 }
 
+#[derive(Args)]
+struct RunArgs {
+    /// Name of the transition/function to run (defaults to "main")
+    #[arg(default_value = "main")]
+    name: String,
+    /// Input arguments as raw Leo literal strings (e.g. "1u32", "aleo1...")
+    inputs: Vec<String>,
+    /// Path to the Aleo project directory (defaults to current dir)
+    #[arg(long)]
+    path: Option<PathBuf>,
+    /// Target network
+    #[arg(long, value_parser = clap::value_parser!(Network))]
+    network: Option<Network>,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Write command results as JSON (optionally --json-output=<FILE> for a custom path)
+    #[arg(long)]
+    json_output: Option<Option<PathBuf>>,
+}
+
+#[derive(Args)]
+struct ExecuteArgs {
+    /// Name of the transition/function to execute (defaults to "main")
+    #[arg(default_value = "main")]
+    name: String,
+    /// Input arguments as raw Leo literal strings (e.g. "1u32", "aleo1...")
+    inputs: Vec<String>,
+    /// Path to the Aleo project directory (defaults to current dir)
+    #[arg(long)]
+    path: Option<PathBuf>,
+    /// Target network
+    #[arg(long, value_parser = clap::value_parser!(Network))]
+    network: Option<Network>,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Actually broadcast the execution transaction (without this, runs in dry-run mode)
+    #[arg(long)]
+    broadcast: bool,
+    /// Write command results as JSON (optionally --json-output=<FILE> for a custom path)
+    #[arg(long)]
+    json_output: Option<Option<PathBuf>>,
+}
+
 #[derive(clap::ValueEnum, Clone)]
 enum Template {
     Payment,
@@ -576,6 +698,8 @@ fn main() -> Result<()> {
         Commands::Deploy(args) => handle_deploy(args, quiet),
         Commands::Audit(args) => handle_audit(args, quiet),
         Commands::Bindings(args) => handle_bindings(args, quiet),
+        Commands::Run(args) => handle_run(args, quiet),
+        Commands::Execute(args) => handle_execute(args, quiet),
         Commands::Records(cmd) => handle_records(cmd, quiet),
     }
 }
@@ -1156,6 +1280,122 @@ fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
     println!("  Output: {}", output_path.display());
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Run / Execute command helpers
+// ---------------------------------------------------------------------------
+
+/// Build the argument list for `leo run` or `leo execute`.
+/// Returns the extra flags (name, inputs, --network, --endpoint,
+/// --json-output) to be passed to run_leo_with. The project path is
+/// handled by run_leo_with via current_dir (same pattern as build/test).
+fn build_leo_run_args(
+    name: &str,
+    inputs: &[String],
+    network: Option<&Network>,
+    endpoint: Option<&str>,
+    json_output: &Option<Option<PathBuf>>,
+) -> Vec<String> {
+    let mut args = vec![name.to_string()];
+    args.extend(inputs.iter().cloned());
+
+    if let Some(net) = network {
+        let net_str = match net {
+            Network::Testnet => "testnet",
+            Network::Mainnet => "mainnet",
+            Network::Canary => "canary",
+        };
+        args.push("--network".to_string());
+        args.push(net_str.to_string());
+    }
+    if let Some(ep) = endpoint {
+        args.push("--endpoint".to_string());
+        args.push(ep.to_string());
+    }
+
+    let json_flags = leo_cmd::json_output_flag(json_output);
+    args.extend(json_flags);
+
+    args
+}
+
+fn handle_run(args: &RunArgs, quiet: bool) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!(
+            "leo is not installed or not on PATH. Install it with: cargo binstall leo-lang"
+        );
+    }
+
+    let dir = args.path.as_deref();
+    let extra_args = build_leo_run_args(
+        &args.name,
+        &args.inputs,
+        args.network.as_ref(),
+        args.endpoint.as_deref(),
+        &args.json_output,
+    );
+
+    print_info(&format!("Running 'leo run {}'...", args.name), quiet);
+    leo_cmd::run_leo_with("run", &extra_args, dir)
+}
+
+fn handle_execute(args: &ExecuteArgs, quiet: bool) -> Result<()> {
+    if !leo_cmd::leo_is_installed() {
+        bail!(
+            "leo is not installed or not on PATH. Install it with: cargo binstall leo-lang"
+        );
+    }
+
+    let dir = args.path.as_deref();
+    let network = args.network.as_ref();
+
+    // Mainnet + broadcast: print informational warning (same pattern as deploy)
+    if args.broadcast && matches!(network, Some(Network::Mainnet)) {
+        println!(
+            "{} {}",
+            "[warning]".yellow().bold(),
+            "Executing on MAINNET with --broadcast. This is irreversible and costs real fees."
+        );
+    }
+
+    let mut extra_args = build_leo_run_args(
+        &args.name,
+        &args.inputs,
+        network,
+        args.endpoint.as_deref(),
+        &args.json_output,
+    );
+
+    if args.broadcast {
+        extra_args.push("--broadcast".to_string());
+    }
+
+    // Do NOT pass --yes to leo. Leo's own help text warns against it:
+    // "DO NOT SET THIS FLAG UNLESS YOU KNOW WHAT YOU ARE DOING"
+    // Let leo's own confirmation prompts surface via inherited stdout/stderr.
+
+    if args.broadcast {
+        print_info(
+            &format!(
+                "Broadcasting execution to '{}'...",
+                match network {
+                    Some(Network::Testnet) => "testnet",
+                    Some(Network::Mainnet) => "mainnet",
+                    Some(Network::Canary) => "canary",
+                    None => "default",
+                }
+            ),
+            quiet,
+        );
+    } else {
+        print_info(
+            "Running in dry-run mode (no --broadcast passed). Add --broadcast to actually execute.",
+            quiet,
+        );
+    }
+
+    leo_cmd::run_leo_with("execute", &extra_args, dir)
 }
 
 // ---------------------------------------------------------------------------
