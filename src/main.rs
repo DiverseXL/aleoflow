@@ -1205,6 +1205,10 @@ enum Network {
     Canary,
 }
 
+/// Default endpoint used by query commands when no --endpoint or --profile resolves one.
+/// Required because `leo query` does not have a built-in fallback endpoint.
+const DEFAULT_QUERY_ENDPOINT: &str = "https://api.explorer.provable.com/v1";
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let quiet = cli.quiet;
@@ -1982,7 +1986,10 @@ fn handle_query_block(args: &QueryBlockArgs, quiet: bool, profile: Option<&str>)
         })
     });
 
-    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+    // Resolve endpoint: CLI --endpoint > --profile > hardcoded default
+    let endpoint = args.endpoint.as_deref()
+        .or(profile_res.endpoint.as_deref())
+        .unwrap_or(DEFAULT_QUERY_ENDPOINT);
 
     let mut sub_args: Vec<String> = Vec::new();
     if let Some(ref id) = args.id {
@@ -2008,7 +2015,7 @@ fn handle_query_block(args: &QueryBlockArgs, quiet: bool, profile: Option<&str>)
         sub_args.push("--to-height".to_string());
     }
 
-    let extra_args = build_query_args("block", &sub_args, network.as_ref(), endpoint, &args.json_output);
+    let extra_args = build_query_args("block", &sub_args, network.as_ref(), Some(endpoint), &args.json_output);
     print_info(&format!("Running 'leo query block'..."), quiet);
     leo_cmd::run_leo_with("query", &extra_args, None)
 }
@@ -2034,7 +2041,10 @@ fn handle_query_transaction(args: &QueryTransactionArgs, quiet: bool, profile: O
         })
     });
 
-    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+    // Resolve endpoint: CLI --endpoint > --profile > hardcoded default
+    let endpoint = args.endpoint.as_deref()
+        .or(profile_res.endpoint.as_deref())
+        .unwrap_or(DEFAULT_QUERY_ENDPOINT);
 
     let mut sub_args: Vec<String> = Vec::new();
     if let Some(ref id) = args.id {
@@ -2059,7 +2069,7 @@ fn handle_query_transaction(args: &QueryTransactionArgs, quiet: bool, profile: O
         sub_args.push(pname.clone());
     }
 
-    let extra_args = build_query_args("transaction", &sub_args, network.as_ref(), endpoint, &args.json_output);
+    let extra_args = build_query_args("transaction", &sub_args, network.as_ref(), Some(endpoint), &args.json_output);
     print_info(&format!("Running 'leo query transaction'..."), quiet);
     leo_cmd::run_leo_with("query", &extra_args, None)
 }
@@ -2085,7 +2095,10 @@ fn handle_query_program(args: &QueryProgramArgs, quiet: bool, profile: Option<&s
         })
     });
 
-    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+    // Resolve endpoint: CLI --endpoint > --profile > hardcoded default
+    let endpoint = args.endpoint.as_deref()
+        .or(profile_res.endpoint.as_deref())
+        .unwrap_or(DEFAULT_QUERY_ENDPOINT);
 
     let mut sub_args: Vec<String> = Vec::new();
     sub_args.push(args.name.clone());
@@ -2101,7 +2114,7 @@ fn handle_query_program(args: &QueryProgramArgs, quiet: bool, profile: Option<&s
         sub_args.extend(mv.iter().cloned());
     }
 
-    let extra_args = build_query_args("program", &sub_args, network.as_ref(), endpoint, &args.json_output);
+    let extra_args = build_query_args("program", &sub_args, network.as_ref(), Some(endpoint), &args.json_output);
     print_info(&format!("Running 'leo query program'..."), quiet);
     leo_cmd::run_leo_with("query", &extra_args, None)
 }
@@ -2127,9 +2140,12 @@ fn handle_query_stateroot(args: &QueryStaterootArgs, quiet: bool, profile: Optio
         })
     });
 
-    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+    // Resolve endpoint: CLI --endpoint > --profile > hardcoded default
+    let endpoint = args.endpoint.as_deref()
+        .or(profile_res.endpoint.as_deref())
+        .unwrap_or(DEFAULT_QUERY_ENDPOINT);
 
-    let extra_args = build_query_args("stateroot", &[], network.as_ref(), endpoint, &args.json_output);
+    let extra_args = build_query_args("stateroot", &[], network.as_ref(), Some(endpoint), &args.json_output);
     print_info(&format!("Running 'leo query stateroot'..."), quiet);
     leo_cmd::run_leo_with("query", &extra_args, None)
 }
@@ -2155,9 +2171,12 @@ fn handle_query_committee(args: &QueryCommitteeArgs, quiet: bool, profile: Optio
         })
     });
 
-    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+    // Resolve endpoint: CLI --endpoint > --profile > hardcoded default
+    let endpoint = args.endpoint.as_deref()
+        .or(profile_res.endpoint.as_deref())
+        .unwrap_or(DEFAULT_QUERY_ENDPOINT);
 
-    let extra_args = build_query_args("committee", &[], network.as_ref(), endpoint, &args.json_output);
+    let extra_args = build_query_args("committee", &[], network.as_ref(), Some(endpoint), &args.json_output);
     print_info(&format!("Running 'leo query committee'..."), quiet);
     leo_cmd::run_leo_with("query", &extra_args, None)
 }
