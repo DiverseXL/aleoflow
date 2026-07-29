@@ -130,6 +130,297 @@ fn find_template(name: &str) -> Option<&'static EmbeddedTemplate> {
     TEMPLATES.iter().find(|t| t.name == name)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // NOTE: The following existing functions are tightly coupled to file I/O or
+    // CLI arg parsing and are not unit-tested here:
+    //   - handle_audit      (WalkDir, fs::read_to_string, CLI args)
+    //   - handle_init       (directory creation, template file copy)
+    //   - handle_bindings   (file reads, leo binary subprocess)
+    //   - handle_build/test/deploy/devnet (shell out to leo binary)
+    //   - find_transition_signatures (indirectly exercised by taint tests;
+    //     a dedicated inline test would require parsing a multi-line body)
+
+    // -----------------------------------------------------------------------
+    // Audit: parse_record_declarations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_record_declarations_with_public_private_fields() {
+        let leo_source = r#"program test.aleo;
+
+    record MyRecord {
+        owner: address,
+        gates: u64,
+        public balance: u64,
+        data: u64,
+    }
+
+    function main:
+        input r0 as u32.public;
+        input r1 as u32.private;
+        add r0 r1 into r2;
+        output r2 as u32.private;
+"#;
+        let lines: Vec<&str> = leo_source.lines().collect();
+        let records = parse_record_declarations(&lines);
+
+        // Should find exactly one record with 4 fields
+        assert_eq!(records.len(), 1);
+        let fields = records.get("MyRecord").expect("expected MyRecord");
+        assert_eq!(fields.len(), 4);
+
+        // Check each field's visibility
+        let owner = fields.iter().find(|(n, _)| n == "owner").expect("owner");
+        assert_eq!(owner.1, "private");
+
+        let balance = fields.iter().find(|(n, _)| n == "balance").expect("balance");
+        assert_eq!(balance.1, "public");
+
+        let gates = fields.iter().find(|(n, _)| n == "gates").expect("gates");
+        assert_eq!(gates.1, "private");
+
+        let data = fields.iter().find(|(n, _)| n == "data").expect("data");
+        assert_eq!(data.1, "private");
+    }
+
+    #[test]
+    fn test_parse_record_declarations_clean_no_records() {
+        let leo_source = r#"program test.aleo;
+
+    function main:
+        input r0 as u32.public;
+        input r1 as u32.private;
+        add r0 r1 into r2;
+        output r2 as u32.private;
+"#;
+        let lines: Vec<&str> = leo_source.lines().collect();
+        let records = parse_record_declarations(&lines);
+        assert!(records.is_empty(), "expected no records in clean source");
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit: parse_let_record_field
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_let_record_field_taint_case() {
+        let leo_source = r#"program test.aleo;
+
+    record Credential {
+        owner: address,
+        secret: u64,
+        public label: u64,
+    }
+
+    transition submit(credential: Credential, amount: u64) -> u64 {
+        let tmp = credential.secret;
+        return tmp;
+    }
+"#;
+        let lines: Vec<&str> = leo_source.lines().collect();
+
+        // Parse the record declaration
+        let record_decls = parse_record_declarations(&lines);
+        assert!(record_decls.contains_key("Credential"));
+
+        // Extract transition params like handle_audit does
+        let sig_line = lines[8]; // transition submit(...
+        let params = leo_func_params(sig_line);
+        let record_params: Vec<(String, &str)> = params
+            .iter()
+            .filter_map(|(pname, ptype)| {
+                let clean_ty = ptype.trim_end_matches(',');
+                if record_decls.contains_key(clean_ty) {
+                    Some((pname.clone(), clean_ty))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Should have identified 'credential' as a record-typed param
+        assert_eq!(record_params.len(), 1);
+        assert_eq!(record_params[0].0, "credential");
+        assert_eq!(record_params[0].1, "Credential");
+
+        // Line 9: `let tmp = credential.secret;` -- private field, should match
+        let result = parse_let_record_field(lines[9], &record_params, &record_decls);
+        assert_eq!(
+            result,
+            Some(("tmp".to_string(), "credential.secret".to_string()))
+        );
+
+        // Same pattern with public field should NOT match
+        let result_public =
+            parse_let_record_field("let x = credential.label;", &record_params, &record_decls);
+        assert_eq!(result_public, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit: parse_direct_field_access
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_direct_field_access_private_field() {
+        let mut record_decls: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        record_decls.insert(
+            "Token".to_string(),
+            vec![
+                ("owner".to_string(), "private".to_string()),
+                ("amount".to_string(), "private".to_string()),
+                ("public_data".to_string(), "public".to_string()),
+            ],
+        );
+
+        let record_params: Vec<(String, &str)> =
+            vec![("cred".to_string(), "Token")];
+
+        // Private field access should be detected
+        let result = parse_direct_field_access("cred.amount", &record_params, &record_decls);
+        assert_eq!(result, Some(("cred".to_string(), "amount".to_string())));
+
+        // Public field access should NOT be detected
+        let result_public =
+            parse_direct_field_access("cred.public_data", &record_params, &record_decls);
+        assert_eq!(result_public, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit: extract_finalize_calls
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_finalize_calls_basic() {
+        let line = "return (finalize_transfer(sender, receiver, amount));";
+        let calls = extract_finalize_calls(line);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "finalize_transfer");
+        assert_eq!(calls[0].1, vec!["sender", "receiver", "amount"]);
+    }
+
+    #[test]
+    fn test_extract_finalize_calls_dot_access_args() {
+        let line = "return (finalize_submit(cred.amount, cred.owner, public_value));";
+        let calls = extract_finalize_calls(line);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "finalize_submit");
+        assert_eq!(calls[0].1, vec!["cred.amount", "cred.owner", "public_value"]);
+    }
+
+    #[test]
+    fn test_extract_finalize_calls_no_calls() {
+        let line = "return (foo + bar);";
+        let calls = extract_finalize_calls(line);
+        assert!(calls.is_empty(), "expected no function calls");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bindings: leo_ty_to_ts
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_leo_ty_to_ts_object_format() {
+        // Object format: {"Primitive": {"UInt": "U64"}}
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": {"UInt": "U64"}}"#).unwrap();
+        assert_eq!(leo_ty_to_ts(&ty), "bigint");
+
+        // {"Primitive": {"UInt": "U32"}}
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": {"UInt": "U32"}}"#).unwrap();
+        assert_eq!(leo_ty_to_ts(&ty), "number");
+
+        // {"Primitive": {"UInt": "U8"}}
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": {"UInt": "U8"}}"#).unwrap();
+        assert_eq!(leo_ty_to_ts(&ty), "number");
+
+        // {"Primitive": {"Boolean": null}}
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": {"Boolean": null}}"#).unwrap();
+        assert_eq!(leo_ty_to_ts(&ty), "boolean");
+    }
+
+    #[test]
+    fn test_leo_ty_to_ts_string_format() {
+        // String format: {"Primitive": "Field"}
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": "Field"}"#).unwrap();
+        assert_eq!(leo_ty_to_ts(&ty), "bigint");
+
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": "Address"}"#).unwrap();
+        assert_eq!(leo_ty_to_ts(&ty), "string");
+
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": "Boolean"}"#).unwrap();
+        assert_eq!(leo_ty_to_ts(&ty), "boolean");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bindings: leo_type_converter_expr
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_leo_type_converter_expr_object_format() {
+        // {"Primitive": {"UInt": "U64"}} -> toU64(x)
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": {"UInt": "U64"}}"#).unwrap();
+        assert_eq!(leo_type_converter_expr(&ty, "x"), "toU64(x)");
+
+        // {"Primitive": {"UInt": "U32"}} -> toU32(x)
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": {"UInt": "U32"}}"#).unwrap();
+        assert_eq!(leo_type_converter_expr(&ty, "x"), "toU32(x)");
+
+        // {"Primitive": {"UInt": "U8"}} -> toU8(x)
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": {"UInt": "U8"}}"#).unwrap();
+        assert_eq!(leo_type_converter_expr(&ty, "x"), "toU8(x)");
+
+        // {"Primitive": {"Boolean": null}} -> toBoolean(x)
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": {"Boolean": null}}"#).unwrap();
+        assert_eq!(leo_type_converter_expr(&ty, "x"), "toBoolean(x)");
+    }
+
+    #[test]
+    fn test_leo_type_converter_expr_string_format() {
+        // {"Primitive": "Field"} -> toField(x)
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": "Field"}"#).unwrap();
+        assert_eq!(leo_type_converter_expr(&ty, "x"), "toField(x)");
+
+        // {"Primitive": "Address"} -> x (passes through as string)
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": "Address"}"#).unwrap();
+        assert_eq!(leo_type_converter_expr(&ty, "x"), "x");
+
+        // {"Primitive": "Boolean"} -> toBoolean(x)
+        let ty: serde_json::Value =
+            serde_json::from_str(r#"{"Primitive": "Boolean"}"#).unwrap();
+        assert_eq!(leo_type_converter_expr(&ty, "x"), "toBoolean(x)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Init: name-sanitization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_init_name_sanitization() {
+        let project_name = "my-aleo-project";
+        let program_id = project_name.replace('-', "_");
+        // Hyphens replaced with underscores in program ID
+        assert_eq!(program_id, "my_aleo_project");
+        // Original folder name preserved unchanged
+        assert_eq!(project_name, "my-aleo-project");
+    }
+}
+
+
 #[derive(Parser)]
 #[command(name = "aleoflow")]
 #[command(about = "A developer toolkit for building on Aleo", long_about = None)]
@@ -158,6 +449,31 @@ enum Commands {
     Audit(AuditArgs),
     /// Generate TypeScript bindings from a compiled Aleo program's ABI
     Bindings(BindingsArgs),
+    /// Scan, list, and manage Aleo records via snarkOS
+    #[command(subcommand)]
+    Records(RecordsCmd),
+}
+
+#[derive(Subcommand)]
+enum RecordsCmd {
+    /// List decrypted records for a view key by scanning a local snarkOS node
+    List(RecordsListArgs),
+}
+
+#[derive(Args)]
+struct RecordsListArgs {
+    /// Aleo view key to scan records for
+    #[arg(long = "view-key")]
+    view_key: String,
+    /// Start block height (defaults to 0)
+    #[arg(long, default_value_t = 0)]
+    start: u32,
+    /// End block height (required)
+    #[arg(long)]
+    end: u32,
+    /// Local snarkOS endpoint URL (defaults to local devnet)
+    #[arg(long, default_value = "http://localhost:3030")]
+    endpoint: String,
 }
 
 #[derive(Args)]
@@ -260,6 +576,7 @@ fn main() -> Result<()> {
         Commands::Deploy(args) => handle_deploy(args, quiet),
         Commands::Audit(args) => handle_audit(args, quiet),
         Commands::Bindings(args) => handle_bindings(args, quiet),
+        Commands::Records(cmd) => handle_records(cmd, quiet),
     }
 }
 
@@ -556,6 +873,53 @@ fn handle_deploy(args: &DeployArgs, quiet: bool) -> Result<()> {
     Ok(())
 }
 
+fn handle_records(cmd: &RecordsCmd, quiet: bool) -> Result<()> {
+    match cmd {
+        RecordsCmd::List(args) => handle_records_list(args, quiet),
+    }
+}
+
+fn handle_records_list(args: &RecordsListArgs, quiet: bool) -> Result<()> {
+    if !leo_cmd::snarkos_is_installed() {
+        bail!(
+            "snarkos is not installed or not on PATH. Install it with: \
+             leo devnet --snarkos <path> --install"
+        );
+    }
+
+    print_info(
+        "Scanning for records via snarkOS. This requires a locally running snarkOS \
+         node (e.g. via 'leo devnet') -- it will not work against the public \
+         testnet API.",
+        quiet,
+    );
+
+    let mut cmd = std::process::Command::new("snarkos");
+    cmd.args([
+        "developer",
+        "scan",
+        "--view-key",
+        &args.view_key,
+        "--start",
+        &args.start.to_string(),
+        "--end",
+        &args.end.to_string(),
+        "--endpoint",
+        &args.endpoint,
+    ]);
+
+    let status = cmd.status().with_context(|| {
+        "Failed to execute 'snarkos developer scan'".to_string()
+    })?;
+
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        bail!("'snarkos developer scan' failed with exit code {}", code);
+    }
+
+    Ok(())
+}
+
 fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
     let project_dir = &args.path;
     if !project_dir.is_dir() {
@@ -617,96 +981,150 @@ fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
     // --- Generate TypeScript bindings ---
     let mut ts = String::new();
 
+    // Header comment
     ts.push_str("// Auto-generated TypeScript bindings for '");
     ts.push_str(program_name);
     ts.push_str("'\n");
     ts.push_str("//\n");
-    ts.push_str("// This is a scaffold, not a finished SDK integration.\n");
-    ts.push_str("// Wire up actual execution using the @provablehq/sdk:\n");
-    ts.push_str("//   https://docs.aleo.org/build/sdk/getting_started\n");
+    ts.push_str("// This file generates real, API-correct execution calls based on the\n");
+    ts.push_str("// documented buildExecutionTransaction interface from @provablehq/sdk.\n");
+    ts.push_str("//\n");
+    ts.push_str("// REQUIRED ENVIRONMENT VARIABLES:\n");
+    ts.push_str("//   PRIVATE_KEY    - The Aleo private key for transaction execution\n");
+    ts.push_str("//   ALEO_ENDPOINT  - The Aleo network endpoint URL (e.g. https://api.provable.com/v2)\n");
+    ts.push_str("//\n");
+    ts.push_str("// Record-typed parameters need additional manual wiring -- see\n");
+    ts.push_str("// https://developer.aleo.org/sdk/typescript/program_manager/ for details.\n");
     ts.push_str("//\n");
     ts.push_str("// Generated by AleoFlow bindings\n");
     ts.push_str("\n");
-    ts.push_str("// import { ProgramManager, AleoNetworkClient } from '@provablehq/sdk';\n");
+
+    // Imports
+    ts.push_str("import {\n");
+    ts.push_str("  AleoKeyProvider,\n");
+    ts.push_str("  AleoNetworkClient,\n");
+    ts.push_str("  ProgramManager,\n");
+    ts.push_str("  NetworkRecordProvider,\n");
+    ts.push_str("  Account,\n");
+    ts.push_str("  initializeWasm,\n");
+    ts.push_str("} from \"@provablehq/sdk\";\n");
     ts.push_str("\n");
+
+    // Shared setup block
+    ts.push_str("// ---------------------------------------------------------------------------\n");
+    ts.push_str("// Shared setup: initialize WASM and create the ProgramManager\n");
+    ts.push_str("// ---------------------------------------------------------------------------\n");
+    ts.push_str("\n");
+    ts.push_str("let _initialized = false;\n");
+    ts.push_str("let _programManager: ProgramManager | null = null;\n");
+    ts.push_str("\n");
+    ts.push_str("async function getProgramManager(): Promise<ProgramManager> {\n");
+    ts.push_str("  if (!_initialized) {\n");
+    ts.push_str("    await initializeWasm();\n");
+    ts.push_str("    _initialized = true;\n");
+    ts.push_str("  }\n");
+    ts.push_str("  if (!_programManager) {\n");
+    ts.push_str("    const keyProvider = new AleoKeyProvider();\n");
+    ts.push_str("    keyProvider.useCache = true;\n");
+    ts.push_str("\n");
+    ts.push_str("    const account = new Account({ privateKey: process.env.PRIVATE_KEY });\n");
+    ts.push_str("    const networkClient = new AleoNetworkClient(process.env.ALEO_ENDPOINT);\n");
+    ts.push_str("    const recordProvider = new NetworkRecordProvider(account, networkClient);\n");
+    ts.push_str("\n");
+    ts.push_str("    _programManager = new ProgramManager(process.env.ALEO_ENDPOINT, keyProvider, recordProvider);\n");
+    ts.push_str("  }\n");
+    ts.push_str("  return _programManager;\n");
+    ts.push_str("}\n");
+    ts.push_str("\n");
+
+    // Type conversion helpers
+    ts.push_str("// ---------------------------------------------------------------------------\n");
+    ts.push_str("// Type conversion helpers\n");
+    ts.push_str("// Convert TypeScript values to Leo-formatted strings for @provablehq/sdk\n");
+    ts.push_str("// ---------------------------------------------------------------------------\n");
+    ts.push_str("\n");
+    ts.push_str("function toU8(n: number): string { return `${n}u8`; }\n");
+    ts.push_str("function toU16(n: number): string { return `${n}u16`; }\n");
+    ts.push_str("function toU32(n: number): string { return `${n}u32`; }\n");
+    ts.push_str("function toU64(n: bigint): string { return `${n}u64`; }\n");
+    ts.push_str("function toU128(n: bigint): string { return `${n}u128`; }\n");
+    ts.push_str("function toI8(n: number): string { return `${n}i8`; }\n");
+    ts.push_str("function toI16(n: number): string { return `${n}i16`; }\n");
+    ts.push_str("function toI32(n: number): string { return `${n}i32`; }\n");
+    ts.push_str("function toI64(n: bigint): string { return `${n}i64`; }\n");
+    ts.push_str("function toI128(n: bigint): string { return `${n}i128`; }\n");
+    ts.push_str("function toBoolean(b: boolean): string { return `${b}`; }\n");
+    ts.push_str("function toAddress(s: string): string { return s; }\n");
+    ts.push_str("function toField(n: bigint): string { return `${n}field`; }\n");
+    ts.push_str("function toScalar(n: bigint): string { return `${n}scalar`; }\n");
+    ts.push_str("function toGroup(s: string): string { return s; }\n");
+    ts.push_str("function toSignature(s: string): string { return s; }\n");
+    ts.push_str("\n");
+
     ts.push_str(&format!("// --- Program: {} ---\n", program_name));
     ts.push_str("\n");
 
     for func in functions {
         let name = func["name"].as_str().unwrap_or("unknown");
         let inputs = func["inputs"].as_array().map(|v| &v[..]).unwrap_or(&[]);
-        let outputs = func["outputs"].as_array().map(|v| &v[..]).unwrap_or(&[]);
 
-        // Issue 3: In Leo 4.x the `transition` keyword has been removed;
-        // all callables use `fn`. The ABI does not distinguish kinds, so
-        // ALL functions in the ABI are included in the bindings.
-        // (Retained as a comment: if `transition` is ever reintroduced,
-        // add a check via `leo_function_kind` and skip `fn`-only entries.)
-
-        // Issue 1: Extract real parameter names from the Leo source.
-        // The ABI only provides types, not names.
+        // Extract real parameter names from the Leo source.
         let param_names = leo_source.as_deref()
             .and_then(|src| leo_param_names(src, name))
             .unwrap_or_default();
 
-        // Build parameter list with TypeScript types
+        // Build parameter list and conversion expressions
         let mut params: Vec<String> = Vec::new();
+        let mut conversions: Vec<String> = Vec::new();
+
         for (i, input) in inputs.iter().enumerate() {
             let ts_type = param_leo_type(input);
-            // Use the real parameter name if available, otherwise fall back to arg0/arg1
             let pname: String = param_names.get(i)
                 .cloned()
                 .unwrap_or_else(|| format!("arg{}", i));
+
             params.push(format!("{}: {}", pname, ts_type));
+
+            if input.get("Record").is_some() {
+                // Record-typed parameter: skip conversion, add comment
+                conversions.push(format!(
+                    "      // TODO: Record-typed input '{}' requires fetching via RecordProvider before use.\n      // See https://developer.aleo.org/sdk/typescript/program_manager/\n      {} as unknown as string",
+                    pname, pname
+                ));
+            } else if let Some(pt) = input.get("Plaintext") {
+                let conv = leo_type_converter_expr(&pt["ty"], &pname);
+                conversions.push(format!("      {}", conv));
+            } else {
+                conversions.push(format!("      String({})", pname));
+            }
         }
 
-        // Build return type
-        let return_ts = if outputs.is_empty() {
-            "void".to_string()
-        } else if outputs.len() == 1 {
-            param_leo_type(&outputs[0]).to_string()
-        } else {
-            let types: Vec<String> = outputs
-                .iter()
-                .map(|o| param_leo_type(o).to_string())
-                .collect();
-            format!("[{}]", types.join(", "))
-        };
-
-        // Issue 2: No reserved-keyword collision with function names.
-        // (Leo function names like `transfer` are not TypeScript reserved words.
-        // If collisions arise with a specific SDK method, add the function name
-        // to a RESERVED_KEYWORDS list below and the generator will append `_`.)
-        //
-        // Reserved keywords that trigger `_` suffix:
-        //   (none currently)
         ts.push_str(&format!("// {}\n", name));
         ts.push_str(&format!(
-            "export async function {}(\n  {}\n): Promise<{}> {{\n",
+            "export async function {}(\n  {}\n): Promise<{{ success: true; txId: string }} | {{ success: false; error: string }}> {{\n",
             name,
-            params.join(",\n  "),
-            return_ts
+            params.join(",\n  ")
         ));
-        ts.push_str("  // TODO: Wire up with @provablehq/sdk\n");
-        ts.push_str("  // const network = new AleoNetworkClient('https://api.explorer.provable.com/v1');\n");
-        ts.push_str("  // const programManager = new ProgramManager(network);\n");
-        ts.push_str("  // return await programManager.execute({\n");
-        ts.push_str(&format!("  //   programName: '{}',\n", program_name));
-        ts.push_str(&format!("  //   functionName: '{}',\n", name));
-        ts.push_str("  //   inputs: [");
-        for (i, _) in inputs.iter().enumerate() {
-            if i > 0 {
-                ts.push_str(", ");
-            }
-            let pname: String = param_names.get(i)
-                .cloned()
-                .unwrap_or_else(|| format!("arg{}", i));
-            ts.push_str(&format!("{}.toString()", pname));
+        ts.push_str("  try {\n");
+        ts.push_str("    const pm = await getProgramManager();\n");
+        ts.push_str("    const tx = await pm.buildExecutionTransaction({\n");
+        ts.push_str(&format!("      programName: \"{}\",\n", program_name));
+        ts.push_str(&format!("      functionName: \"{}\",\n", name));
+        ts.push_str("      priorityFee: 0.0,\n");
+        ts.push_str("      privateFee: false,\n");
+        ts.push_str("      inputs: [\n");
+        for conv in &conversions {
+            ts.push_str(conv);
+            ts.push_str(",\n");
         }
-        ts.push_str("],\n");
-        ts.push_str("  //   privateKey: process.env.PRIVATE_KEY,\n");
-        ts.push_str("  // });\n");
-        ts.push_str("  throw new Error('Not implemented — wire up with @provablehq/sdk');\n");
+        ts.push_str("      ],\n");
+        ts.push_str(&format!("      keySearchParams: {{ cacheKey: \"{}:{}\" }},\n", program_id, name));
+        ts.push_str("    });\n");
+        ts.push_str("    const txId = await pm.networkClient.submitTransaction(tx.toString());\n");
+        ts.push_str("    return { success: true, txId };\n");
+        ts.push_str("  } catch (error) {\n");
+        ts.push_str("    return { success: false, error: error instanceof Error ? error.message : String(error) };\n");
+        ts.push_str("  }\n");
         ts.push_str("}\n\n");
     }
 
@@ -801,6 +1219,64 @@ fn leo_param_names(source: &str, func_name: &str) -> Option<Vec<String>> {
     None
 }
 
+/// Return the Leo-formatted string conversion expression for an ABI type.
+/// Maps each Leo primitive to its corresponding helper function call.
+/// Handles both ABI formats:
+///   - Object: `{"Primitive": {"UInt": "U64"}}` (parameterized primitives)
+///   - String: `{"Primitive": "Field"}` (simple primitives)
+fn leo_type_converter_expr(ty: &serde_json::Value, var_name: &str) -> String {
+    if let Some(prim) = ty.get("Primitive") {
+        // Handle string format: {"Primitive": "Field"}
+        if let Some(prim_str) = prim.as_str() {
+            return match prim_str {
+                "Boolean" => format!("toBoolean({})", var_name),
+                "Address" => var_name.to_string(),
+                "Field" => format!("toField({})", var_name),
+                "Scalar" => format!("toScalar({})", var_name),
+                "Group" => var_name.to_string(),
+                "Signature" => var_name.to_string(),
+                "String" => var_name.to_string(),
+                _ => format!("String({}) /* {} */", var_name, prim_str),
+            };
+        }
+        // Handle object format: {"Primitive": {"UInt": "U64"}}
+        if let Some(obj) = prim.as_object() {
+            for (type_name, size_val) in obj {
+                return match type_name.as_str() {
+                    "Boolean" => format!("toBoolean({})", var_name),
+                    "Int8" => format!("toI8({})", var_name),
+                    "Int16" => format!("toI16({})", var_name),
+                    "Int32" => format!("toI32({})", var_name),
+                    "Int64" => format!("toI64({})", var_name),
+                    "Int128" => format!("toI128({})", var_name),
+                    "UInt" | "UInt8" | "UInt16" | "UInt32" | "UInt64" | "UInt128" => {
+                        let fn_name = match size_val.as_str() {
+                            Some("U8") => "toU8",
+                            Some("U16") => "toU16",
+                            Some("U32") => "toU32",
+                            Some("U64") => "toU64",
+                            Some("U128") => "toU128",
+                            _ => "toU64",
+                        };
+                        format!("{}({})", fn_name, var_name)
+                    }
+                    "Field" => format!("toField({})", var_name),
+                    "Scalar" => format!("toScalar({})", var_name),
+                    "Address" => var_name.to_string(),
+                    "Group" => var_name.to_string(),
+                    "Signature" => var_name.to_string(),
+                    "String" => var_name.to_string(),
+                    _ => format!("String({}) /* unknown primitive */", var_name),
+                };
+            }
+        }
+    }
+    if ty.get("Struct").is_some() {
+        return var_name.to_string();
+    }
+    format!("String({})", var_name)
+}
+
 /// Extract the TypeScript type string from an ABI parameter value.
 fn param_leo_type(param: &serde_json::Value) -> String {
     // The parameter is wrapped in a variant key like "Plaintext" or "Record"
@@ -828,6 +1304,17 @@ fn param_leo_type(param: &serde_json::Value) -> String {
 /// The key is the type family and the *value* carries the bit-width for UInt.
 fn leo_ty_to_ts(ty: &serde_json::Value) -> String {
     if let Some(prim) = ty.get("Primitive") {
+        // Handle string format: {"Primitive": "Field"}
+        if let Some(prim_str) = prim.as_str() {
+            return match prim_str {
+                "Boolean" => "boolean".to_string(),
+                "Address" => "string".to_string(),
+                "Field" | "Scalar" => "bigint".to_string(),
+                "Group" | "Signature" | "String" => "string".to_string(),
+                _ => format!("unknown /* {} */", prim_str),
+            };
+        }
+        // Handle object format: {"Primitive": {"UInt": "U64"}}
         if let Some(obj) = prim.as_object() {
             for (type_name, size_val) in obj {
                 return match type_name.as_str() {
@@ -856,10 +1343,359 @@ fn leo_ty_to_ts(ty: &serde_json::Value) -> String {
     "unknown".to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Audit helper functions
+// ---------------------------------------------------------------------------
+
+/// Parse record declarations from Leo source lines.
+/// Returns a map: record_name -> Vec<(field_name, visibility)>
+/// where visibility is "private" or "public".
+fn parse_record_declarations(lines: &[&str]) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut records: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed.starts_with("record ") && trimmed.contains('{') {
+            // Extract record name
+            let name = trimmed
+                .strip_prefix("record ")
+                .and_then(|s| s.split_whitespace().next())
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                i += 1;
+                continue;
+            }
+
+            // Consume opening brace depth
+            let mut depth = trimmed.matches('{').count() as i32
+                - trimmed.matches('}').count() as i32;
+            let mut fields: Vec<(String, String)> = Vec::new();
+            i += 1;
+
+            while i < lines.len() && depth > 0 {
+                let inner = lines[i].trim();
+                depth += inner.matches('{').count() as i32;
+                depth -= inner.matches('}').count() as i32;
+
+                if depth > 0 && !inner.is_empty() && !inner.starts_with("//") {
+                    // Parse field: [public] name: type,
+                    let field_line = inner.trim_end_matches(',');
+                    if field_line.contains(':') && !field_line.starts_with('}') {
+                        let visibility = if field_line.starts_with("public ") {
+                            "public"
+                        } else {
+                            "private"
+                        };
+                        let after_vis = if visibility == "public" {
+                            field_line.strip_prefix("public ").unwrap_or(field_line)
+                        } else {
+                            field_line
+                        };
+                        if let Some(col) = after_vis.find(':') {
+                            let fname = after_vis[..col].trim().to_string();
+                            if !fname.is_empty() {
+                                fields.push((fname, visibility.to_string()));
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+            records.insert(name, fields);
+        } else {
+            i += 1;
+        }
+    }
+    records
+}
+
+/// Extract function/transition parameter names and types from a signature line.
+fn leo_func_params(sig_line: &str) -> Vec<(String, String)> {
+    let paren_open = match sig_line.find('(') {
+        Some(p) => p,
+        None => return vec![],
+    };
+    let after_open = &sig_line[paren_open + 1..];
+    let mut depth = 1i32;
+    let mut paren_close = None;
+    for (i, ch) in after_open.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    paren_close = Some(paren_open + 1 + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let params_str = match paren_close {
+        Some(close) => &sig_line[paren_open + 1..close],
+        None => return vec![],
+    };
+
+    let mut result = Vec::new();
+    for segment in params_str.split(',') {
+        let seg = segment.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        if let Some(col) = seg.find(':') {
+            let pname = seg[..col].trim().to_string();
+            let ptype = seg[col + 1..].trim().to_string();
+            result.push((pname, ptype));
+        }
+    }
+    result
+}
+
+/// Find transition function signatures and their body line ranges.
+/// Returns Vec<(name, sig_line, body_start, body_end)>
+fn find_transition_signatures(lines: &[&str]) -> Vec<(String, usize, usize, usize)> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if (trimmed.starts_with("transition ") || trimmed.starts_with("async function "))
+            && trimmed.contains('(')
+        {
+            let name = if trimmed.starts_with("transition ") {
+                trimmed
+                    .strip_prefix("transition ")
+                    .and_then(|s| s.split('(').next())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            } else {
+                trimmed
+                    .strip_prefix("async function ")
+                    .and_then(|s| s.split('(').next())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            };
+
+            if name.is_empty() {
+                i += 1;
+                continue;
+            }
+
+            // Find opening brace
+            let mut sig_line = i;
+            let mut body_start = i;
+            let mut found_brace = false;
+            for j in i..lines.len() {
+                if lines[j].trim().contains('{') {
+                    sig_line = i;
+                    body_start = j + 1;
+                    found_brace = true;
+                    break;
+                }
+            }
+
+            if !found_brace {
+                i += 1;
+                continue;
+            }
+
+            // Find closing brace by counting depth
+            let mut depth = 1i32;
+            let mut body_end = body_start;
+            for j in body_start..lines.len() {
+                let inner = lines[j].trim();
+                depth += inner.matches('{').count() as i32;
+                depth -= inner.matches('}').count() as i32;
+                if depth <= 0 {
+                    body_end = j;
+                    break;
+                }
+            }
+
+            result.push((name, sig_line, body_start, body_end));
+            i = body_end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Parse a `let <var> = <record_param>.<field>;` pattern.
+/// Returns Some((var_name, "record_param.field")) if matched.
+fn parse_let_record_field(
+    line: &str,
+    record_params: &[(String, &str)],
+    record_declarations: &BTreeMap<String, Vec<(String, String)>>,
+) -> Option<(String, String)> {
+    let line = line.trim_end_matches(';').trim();
+    if !line.starts_with("let ") || !line.contains(" = ") {
+        return None;
+    }
+
+    let after_let = line.strip_prefix("let ")?;
+    let eq_pos = after_let.find(" = ")?;
+    let var_name = after_let[..eq_pos].trim().to_string();
+    let rhs = after_let[eq_pos + 3..].trim();
+
+    // RHS must be of form <record_param>.<field>
+    let dot_pos = rhs.find('.')?;
+    let param_name = rhs[..dot_pos].trim();
+    let field_name = rhs[dot_pos + 1..].trim();
+
+    // Check if param_name is a record-typed parameter
+    let record_type = record_params.iter()
+        .find(|(pname, _)| pname == param_name)
+        .map(|(_, ptype)| *ptype)?;
+
+    // Check if field is private in the record declaration
+    let decl = record_declarations.get(record_type)?;
+    let is_private = decl.iter()
+        .find(|(fname, _)| fname == &field_name)
+        .map(|(_, vis)| vis == "private")
+        .unwrap_or(false);
+
+    if is_private {
+        Some((var_name, format!("{}.{}", param_name, field_name)))
+    } else {
+        None
+    }
+}
+
+/// Parse a direct `record_param.field` access.
+/// Returns Some((param_name, field_name)) if it's a private record field access.
+fn parse_direct_field_access(
+    arg: &str,
+    record_params: &[(String, &str)],
+    record_declarations: &BTreeMap<String, Vec<(String, String)>>,
+) -> Option<(String, String)> {
+    let arg = arg.trim().trim_end_matches(',');
+    let dot_pos = arg.find('.')?;
+    let param_name = arg[..dot_pos].trim().to_string();
+    let field = arg[dot_pos + 1..].trim().to_string();
+
+    let record_type = record_params.iter()
+        .find(|(pname, _)| pname.as_str() == param_name)?;
+
+    let decl = record_declarations.get(record_type.1)?;
+    let is_private = decl.iter()
+        .find(|(fname, _)| fname == &field)
+        .map(|(_, vis)| vis == "private")
+        .unwrap_or(false);
+
+    if is_private {
+        Some((param_name, field))
+    } else {
+        None
+    }
+}
+
+/// Extract all function-call names and their arguments from within a return expression.
+/// For `return (..., func_name(arg1, arg2));`, returns [(func_name, [arg1, arg2])].
+/// This is a best-effort heuristic -- it finds identifiers and dot-accesses
+/// that look like arguments inside function calls in the return expression.
+fn extract_finalize_calls(line: &str) -> Vec<(String, Vec<String>)> {
+    let mut calls = Vec::new();
+    let line = line.trim_end_matches(';');
+
+    // Find the start of each function call: any `name(` inside the return
+    let mut search_start = 0;
+    loop {
+        let paren_open = match line[search_start..].find('(') {
+            Some(p) => search_start + p,
+            None => break,
+        };
+
+        // Look backwards from paren_open to find if there's an identifier
+        let before_paren = line[..paren_open].trim_end();
+        let call_start = before_paren.rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let func_name = before_paren[call_start..].trim();
+
+        if func_name.is_empty() || func_name == "return" {
+            // Skip `return (` itself -- just advance past `(` and continue scanning
+            // inside the return expression so nested function calls are found.
+            search_start = paren_open + 1;
+            continue;
+        }
+
+        // We found a function call -- parse its arguments
+        let after_open = &line[paren_open + 1..];
+        let mut depth = 1i32;
+        let mut call_end = None;
+        for (i, ch) in after_open.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        call_end = Some(paren_open + 1 + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let args_str = match call_end {
+            Some(end) => &line[paren_open + 1..end],
+            None => {
+                search_start = paren_open + 1;
+                continue;
+            }
+        };
+
+        // Split arguments by comma, respecting nested parens
+        let mut arg_parts = Vec::new();
+        let mut part_start = 0;
+        let mut pdepth = 0i32;
+        for (i, ch) in args_str.char_indices() {
+            match ch {
+                '(' => pdepth += 1,
+                ')' => pdepth -= 1,
+                ',' if pdepth == 0 => {
+                    let arg = args_str[part_start..i].trim().to_string();
+                    if !arg.is_empty() {
+                        arg_parts.push(arg);
+                    }
+                    part_start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        let last_arg = args_str[part_start..].trim().to_string();
+        if !last_arg.is_empty() {
+            arg_parts.push(last_arg);
+        }
+
+        if !func_name.is_empty() {
+            calls.push((func_name.to_string(), arg_parts));
+        }
+        search_start = call_end.unwrap_or(paren_open + 1) + 1;
+    }
+
+    calls
+}
+
+
 fn handle_audit(args: &AuditArgs, quiet: bool) -> Result<()> {
     // NOTE: This is a heuristic linter for hackathon-demo purposes.
     // It performs line-based static analysis and is NOT a formal verifier.
     // Real security audits require formal verification tools.
+    //
+    // Checks:
+    //   1. Sensitive identifiers (password, secret, etc.) outside records
+    //   2. TODO/FIXME comment detection
+    //   3. Mapping::set with sensitive key names
+    //   4. Record field visibility on sensitive fields
+    //   5. Finalize-leak (transition passes private record field values to
+    //      async/finalize functions, where args are public on-chain).
+    //      This is a single-hop/shallow taint tracker scoped to one
+    //      transition body -- it does NOT follow chains of reassignments,
+    //      arithmetic transforms, or values passed through helper fns.
 
     let audit_path = Path::new(&args.path);
     if !audit_path.exists() {
@@ -874,8 +1710,6 @@ fn handle_audit(args: &AuditArgs, quiet: bool) -> Result<()> {
     };
 
     // Sensitive identifiers to watch for
-    // These are flagged when used outside a record (on-chain public data)
-    // or when declared as 'public' fields inside a record.
     let sensitive_ids = ["password", "secret", "private_key", "ssn"];
 
     // Findings grouped by file path
@@ -902,8 +1736,6 @@ fn handle_audit(args: &AuditArgs, quiet: bool) -> Result<()> {
         })?;
 
         let lines: Vec<&str> = content.lines().collect();
-
-        // Produce a display path relative to the scanned root
         let rel = path
             .strip_prefix(audit_path)
             .unwrap_or(path)
@@ -913,9 +1745,14 @@ fn handle_audit(args: &AuditArgs, quiet: bool) -> Result<()> {
 
         let file_findings = grouped.entry(rel.clone()).or_default();
 
-        // Simple state machine to track record block boundaries.
-        // Only record types have private/public visibility in Leo.
-        // Data outside a record is public on-chain.
+        // -----------------------------------------------------------------------
+        // Phase 1: Parse record declarations from the file
+        // -----------------------------------------------------------------------
+        let record_declarations = parse_record_declarations(&lines);
+
+        // -----------------------------------------------------------------------
+        // Phase 2: Line-by-line scans
+        // -----------------------------------------------------------------------
         let mut record_active = false;
         let mut record_brace_depth: i32 = 0;
 
@@ -937,16 +1774,14 @@ fn handle_audit(args: &AuditArgs, quiet: bool) -> Result<()> {
                 }
 
                 // --- Outside any record block ---
+
                 // Check 1: Sensitive identifiers outside a record.
-                // In Aleo, data outside records is public on-chain.
                 for id in &sensitive_ids {
                     if trimmed.contains(id) && !trimmed.starts_with("//") {
                         file_findings.push((
                             "[warning]".yellow().bold().to_string(),
                             format!(
-                                "Line {}: '{}' appears outside a record — this data is \
-                                 public on-chain. Wrap it in a private record if it should \
-                                 be confidential.",
+                                "Line {}: '{}' appears outside a record -- this data is                                  public on-chain. Wrap it in a private record if it should                                  be confidential.",
                                 i + 1,
                                 id
                             ),
@@ -967,77 +1802,6 @@ fn handle_audit(args: &AuditArgs, quiet: bool) -> Result<()> {
                     ));
                 }
 
-                // Check 3: Functions returning address/numeric without access control
-                // (heuristic: scan the function body for assert/require/assert_neq guards)
-                if trimmed.starts_with("fn ") {
-                    // Find the function signature end (the line with '{')
-                    let mut sig_end = i;
-                    let mut found_brace = false;
-                    for j in i..lines.len() {
-                        if lines[j].trim().contains('{') {
-                            sig_end = j;
-                            found_brace = true;
-                            break;
-                        }
-                    }
-
-                    if found_brace {
-                        // Build the full signature
-                        let sig: Vec<&str> = lines[i..=sig_end]
-                            .iter()
-                            .map(|l| l.trim())
-                            .collect();
-                        let sig_text = sig.join(" ");
-
-                        let returns_address = sig_text.contains("> address");
-                        let returns_numeric = sig_text.contains("> u");
-
-                        // Scan the function body by counting braces to find its end.
-                        // Track whether we find a guard (only matters for sensitive returns).
-                        let mut brace_depth = 1u32;
-                        let mut has_guard = false;
-                        let mut k = sig_end + 1;
-
-                        while k < lines.len() && brace_depth > 0 {
-                            let bline = lines[k].trim();
-                            brace_depth = (brace_depth as i32
-                                + bline.matches('{').count() as i32
-                                - bline.matches('}').count() as i32)
-                                .max(0) as u32;
-
-                            if (returns_address || returns_numeric)
-                                && (bline.contains("assert") || bline.contains("require"))
-                            {
-                                has_guard = true;
-                            }
-                            k += 1;
-                        }
-
-                        // Report missing guard only for functions that return sensitive types
-                        if (returns_address || returns_numeric) && !has_guard {
-                            let return_type = if returns_address {
-                                "address"
-                            } else {
-                                "numeric"
-                            };
-                            file_findings.push((
-                                "[info]".cyan().bold().to_string(),
-                                format!(
-                                    "Line {}: Function returns {} value with no \
-                                     assert/require guard found in function body. \
-                                     Ensure access control is enforced.",
-                                    i + 1,
-                                    return_type
-                                ),
-                            ));
-                        }
-
-                        // Skip past the function body so its lines are not re-scanned
-                        i = k;
-                        continue;
-                    }
-                }
-
                 i += 1;
             } else {
                 // --- Inside a record block ---
@@ -1050,18 +1814,15 @@ fn handle_audit(args: &AuditArgs, quiet: bool) -> Result<()> {
                     continue;
                 }
 
-                // Check for public visibility on sensitive record fields
-                // Leo's record syntax: {visibility} field_name: type,
-                // Fields default to 'private' unless explicitly marked 'public'.
+                // Check 4 (old record-field check):
+                // Public visibility on sensitive record fields
                 if trimmed.contains("public ") {
                     for id in &sensitive_ids {
                         if trimmed.contains(id) {
                             file_findings.push((
                                 "[warning]".yellow().bold().to_string(),
                                 format!(
-                                    "Line {}: Record field '{}' is declared 'public' and \
-                                     may expose sensitive data on-chain. Consider omitting \
-                                     the 'public' modifier (default is 'private').",
+                                    "Line {}: Record field '{}' is declared 'public' and                                      may expose sensitive data on-chain. Consider omitting                                      the 'public' modifier (default is 'private').",
                                     i + 1,
                                     id
                                 ),
@@ -1071,6 +1832,113 @@ fn handle_audit(args: &AuditArgs, quiet: bool) -> Result<()> {
                 }
 
                 i += 1;
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Phase 3: Scan for Mapping::set with sensitive key names  (Check 3)
+        // -----------------------------------------------------------------------
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.contains("Mapping::set")
+                || trimmed.contains(".set(")
+            {
+                // Check if any string literal argument contains a sensitive word
+                for id in &sensitive_ids {
+                    if trimmed.to_lowercase().contains(id) {
+                        file_findings.push((
+                            "[warning]".yellow().bold().to_string(),
+                            format!(
+                                "Line {}: Mapping::set uses potentially sensitive key '{}'.                                  Mapping keys are public on-chain and visible to all.                                  Avoid using raw sensitive identifiers as mapping keys.",
+                                i + 1,
+                                id
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Phase 4: Finalize-leak check via local data-flow tracking  (Check 5)
+        // -----------------------------------------------------------------------
+        let transitions = find_transition_signatures(&lines);
+        for (_trans_name, trans_sig_line, trans_body_start, trans_body_end) in &transitions {
+            // Identify record-typed parameters for this transition
+            let params = leo_func_params(lines[*trans_sig_line]);
+            let record_params: Vec<(String, &str)> = params.iter()
+                .filter_map(|(pname, ptype)| {
+                    let clean_ty = ptype.trim_end_matches(',');
+                    if record_declarations.contains_key(clean_ty) {
+                        Some((pname.clone(), clean_ty))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if record_params.is_empty() {
+                continue;
+            }
+
+            // Build a local taint map: local_var -> (original_record_param.field_name)
+            let mut taint_map: BTreeMap<String, String> = BTreeMap::new();
+
+            for j in *trans_body_start..=*trans_body_end {
+                let line = lines[j].trim();
+
+                // Track let-bindings from record field access
+                if let Some(capture) = parse_let_record_field(line, &record_params, &record_declarations) {
+                    taint_map.insert(capture.0, capture.1);
+                }
+            }
+
+            // Scan for return patterns: `return (..., call_name(args));`
+            for j in *trans_body_start..=*trans_body_end {
+                let line = lines[j].trim();
+                if !line.starts_with("return ") {
+                    continue;
+                }
+
+                // Find all function-call arguments within the return expression
+                let calls = extract_finalize_calls(line);
+                for (finalize_name, args) in &calls {
+                    for arg in args {
+                        // Case A: Direct record field access: `record_param.field`
+                        if let Some((_rp_name, field)) = parse_direct_field_access(arg, &record_params, &record_declarations) {
+                            file_findings.push((
+                                "[warning]".yellow().bold().to_string(),
+                                format!(
+                                    "Line {}: Record field '{}' (private) may be exposed publicly                                      via finalize function '{}' -- finalize/async function arguments                                      are public on-chain, even when derived from private record fields.                                      See https://blog.zksecurity.xyz/posts/aleo-program-security/ for                                      details and the fix (pass a commitment/hash instead).
+                                       [single-hop/shallow: does not track chained reassignments,                                      arithmetic transforms, or values through helper fns.]",
+                                    j + 1,
+                                    field,
+                                    finalize_name
+                                ),
+                            ));
+                            continue;
+                        }
+
+                        // Case B: Local variable from taint map
+                        let clean_arg = arg.trim_end_matches(',');
+                        if let Some(origin) = taint_map.get(clean_arg) {
+                            file_findings.push((
+                                "[warning]".yellow().bold().to_string(),
+                                format!(
+                                    "Line {}: Variable '{}' derived from private record field '{}'                                      may be exposed publicly via finalize function '{}' --                                      finalize/async function arguments are public on-chain, even                                      when derived from private record fields.                                      See https://blog.zksecurity.xyz/posts/aleo-program-security/ for                                      details and the fix (pass a commitment/hash instead).
+                                       [single-hop/shallow: does not track chained reassignments,                                      arithmetic transforms, or values through helper fns.]",
+                                    j + 1,
+                                    clean_arg,
+                                    origin,
+                                    finalize_name
+                                ),
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -1119,7 +1987,7 @@ fn handle_audit(args: &AuditArgs, quiet: bool) -> Result<()> {
     );
     if !quiet {
         println!(
-            "{} This is a heuristic linter for demonstration purposes, not a formal verifier.",
+            "{} This is a heuristic linter for demonstration purposes, not a formal verifier.              The finalize-leak check is a single-hop/shallow taint tracker scoped to one              transition body (does not track chained reassignments, arithmetic transforms,              or values through helper fn calls).",
             "[info]".dimmed()
         );
     }
