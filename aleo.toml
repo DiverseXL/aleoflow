@@ -1,6 +1,25 @@
 # AleoFlow configuration file (optional).
 # Place this file in the project root or the directory where you run aleoflow.
 # CLI flags always override these values.
+#
+# WARNING: NEVER add a private_key field here. Config files can be committed
+# to git. Private keys must stay in .gitignore-excluded .env files or shell env
+# vars (PRIVATE_KEY) instead.
 
 default_network = "testnet"
 default_template = "payment"
+
+# Named profiles for quick --profile <name> usage.
+# Each profile sets network/endpoint for deploy, devnet, run, execute, and
+# records list. CLI flags --network/--endpoint override the profile's values.
+[profiles.testnet]
+endpoint = "https://api.explorer.provable.com/v1/testnet"
+network = "testnet"
+
+[profiles.mainnet]
+endpoint = "https://api.explorer.provable.com/v1/mainnet"
+network = "mainnet"
+
+[profiles.local]
+endpoint = "http://localhost:3030"
+network = "testnet"

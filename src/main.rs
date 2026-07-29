@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand, Args};
 use colored::*;
 use serde::Deserialize;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -47,14 +47,31 @@ struct FuncInfo {
 // Optional aleo.toml config file support
 // ---------------------------------------------------------------------------
 
+/// A single profile entry in aleo.toml's [profiles] table.
+/// NEVER store private keys here. Use .env files or shell env vars.
+#[derive(Deserialize, Clone, Default)]
+struct ProfileConfig {
+    endpoint: Option<String>,
+    network: Option<String>,
+}
+
 /// Configuration loaded from aleo.toml (optional, in current working directory).
 /// Falls back gracefully if the file is missing or malformed.
+//
+// Precedence order (most to least specific):
+//   explicit CLI --network/--endpoint flags
+//   > --profile <name> values from aleo.toml's [profiles.<name>]
+//   > aleo.toml's default_network
+//   > built-in hardcoded defaults
 #[derive(Deserialize, Default)]
 struct AleoFlowConfig {
     #[serde(default)]
     default_network: Option<String>,
     #[serde(default)]
     default_template: Option<String>,
+    /// Named environment profiles: [profiles.<name>] with endpoint/network.
+    #[serde(default)]
+    profiles: Option<HashMap<String, ProfileConfig>>,
 }
 
 /// Try to load aleo.toml from the current working directory.
@@ -96,6 +113,70 @@ fn parse_network(s: &str) -> Option<Network> {
 }
 
 /// Parse a template name from the config into the Template enum.
+
+/// Resolved values from an optional --profile flag.
+struct ProfileResolution {
+    network: Option<Network>,
+    endpoint: Option<String>,
+}
+
+/// Look up a named profile from aleo.toml and return its network/endpoint values.
+/// Errors if the profile name does not exist in the config, listing available ones.
+fn resolve_profile(
+    profile_name: Option<&str>,
+    cfg: &AleoFlowConfig,
+    quiet: bool,
+) -> Result<ProfileResolution> {
+    let pname = match profile_name {
+        None => return Ok(ProfileResolution { network: None, endpoint: None }),
+        Some(n) => n,
+    };
+
+    let profiles = cfg.profiles.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Profile '{}' is not defined in aleo.toml (no [profiles] section). \
+             Define profiles in aleo.toml like:\n  \
+             [profiles.{}]\n  \
+             endpoint = \"<url>\"\n  \
+             network = \"<testnet|mainnet|canary>\"",
+            pname, pname
+        )
+    })?;
+
+    let profile = profiles.get(pname).ok_or_else(|| {
+        let mut available: Vec<&str> = profiles.keys().map(|s| s.as_str()).collect();
+        available.sort();
+        anyhow::anyhow!(
+            "Profile '{}' not found in aleo.toml. Available profiles: {}",
+            pname,
+            available.join(", ")
+        )
+    })?;
+
+    let network = profile.network.as_deref().and_then(parse_network);
+    let endpoint = profile.endpoint.clone();
+
+    if !quiet {
+        let net_display = network
+            .as_ref()
+            .map(|n| match n {
+                Network::Testnet => "testnet",
+                Network::Mainnet => "mainnet",
+                Network::Canary => "canary",
+            })
+            .unwrap_or("(unspecified)");
+        let ep_display = endpoint.as_deref().unwrap_or("(unspecified)");
+        println!(
+            "{} Using profile '{}': network={}, endpoint={}",
+            "[info]".cyan().bold(),
+            pname,
+            net_display,
+            ep_display
+        );
+    }
+
+    Ok(ProfileResolution { network, endpoint })
+}
 fn parse_template(s: &str) -> Option<Template> {
     match s.to_lowercase().as_str() {
         "payment" => Some(Template::Payment),
@@ -607,6 +688,10 @@ struct Cli {
     /// Suppress [info] messages for quieter output (useful with --json-output)
     #[arg(short = 'q', long, global = true)]
     quiet: bool,
+
+    /// Named environment profile from aleo.toml (sets network/endpoint)
+    #[arg(long, global = true)]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -658,9 +743,9 @@ struct RecordsListArgs {
     /// End block height (required)
     #[arg(long)]
     end: u32,
-    /// Local snarkOS endpoint URL (defaults to local devnet)
-    #[arg(long, default_value = "http://localhost:3030")]
-    endpoint: String,
+    /// Local snarkOS endpoint URL (defaults to http://localhost:3030)
+    #[arg(long)]
+    endpoint: Option<String>,
 }
 
 #[derive(Args)]
@@ -929,19 +1014,20 @@ enum Network {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let quiet = cli.quiet;
+    let profile = cli.profile.as_deref();
 
     match &cli.command {
         Commands::Init(args) => handle_init(args, quiet),
-        Commands::Devnet(args) => handle_devnet(args, quiet),
+        Commands::Devnet(args) => handle_devnet(args, quiet, profile),
         Commands::Build(args) => handle_build(args, quiet),
         Commands::Test(args) => handle_test(args, quiet),
-        Commands::Deploy(args) => handle_deploy(args, quiet),
+        Commands::Deploy(args) => handle_deploy(args, quiet, profile),
         Commands::Fmt(args) => handle_fmt(args, quiet),
         Commands::Audit(args) => handle_audit(args, quiet),
         Commands::Bindings(args) => handle_bindings(args, quiet),
-        Commands::Run(args) => handle_run(args, quiet),
-        Commands::Execute(args) => handle_execute(args, quiet),
-        Commands::Records(cmd) => handle_records(cmd, quiet),
+        Commands::Run(args) => handle_run(args, quiet, profile),
+        Commands::Execute(args) => handle_execute(args, quiet, profile),
+        Commands::Records(cmd) => handle_records(cmd, quiet, profile),
         Commands::Doctor(args) => handle_doctor(args, quiet),
         Commands::Account(cmd) => handle_account(cmd, quiet),
     }
@@ -1321,7 +1407,7 @@ fn handle_doctor(_args: &DoctorArgs, _quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn handle_devnet(args: &DevnetArgs, quiet: bool) -> Result<()> {
+fn handle_devnet(args: &DevnetArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
 
     if !leo_cmd::leo_is_installed() {
         bail!(
@@ -1330,9 +1416,10 @@ fn handle_devnet(args: &DevnetArgs, quiet: bool) -> Result<()> {
     }
 
     let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
 
-    // Resolve network: CLI flag > config > default (Testnet)
-    let network = args.network.clone().or_else(move || {
+    // Resolve network: CLI --network > --profile > config > default (Testnet)
+    let network = args.network.clone().or(profile_res.network).or_else(move || {
         cfg.default_network
             .as_deref()
             .and_then(parse_network)
@@ -1394,11 +1481,12 @@ fn handle_devnet(args: &DevnetArgs, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn handle_deploy(args: &DeployArgs, quiet: bool) -> Result<()> {
+fn handle_deploy(args: &DeployArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
     let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
 
-    // Resolve network: CLI flag > config > default (Testnet)
-    let network = args.network.clone().or_else(move || {
+    // Resolve network: CLI --network > --profile > config > default (Testnet)
+    let network = args.network.clone().or(profile_res.network).or_else(move || {
         cfg.default_network
             .as_deref()
             .and_then(parse_network)
@@ -1604,9 +1692,9 @@ fn handle_deploy(args: &DeployArgs, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn handle_records(cmd: &RecordsCmd, quiet: bool) -> Result<()> {
+fn handle_records(cmd: &RecordsCmd, quiet: bool, profile: Option<&str>) -> Result<()> {
     match cmd {
-        RecordsCmd::List(args) => handle_records_list(args, quiet),
+        RecordsCmd::List(args) => handle_records_list(args, quiet, profile),
     }
 }
 
@@ -1769,13 +1857,20 @@ fn handle_account_decrypt(args: &AccountDecryptArgs, quiet: bool) -> Result<()> 
     Ok(())
 }
 
-fn handle_records_list(args: &RecordsListArgs, quiet: bool) -> Result<()> {
+fn handle_records_list(args: &RecordsListArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
     if !leo_cmd::snarkos_is_installed() {
         bail!(
             "snarkos is not installed or not on PATH. Install it with: \
              leo devnet --snarkos <path> --install"
         );
     }
+
+    // Resolve endpoint: CLI --endpoint > --profile > built-in default
+    let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
+    let endpoint = args.endpoint.clone()
+        .or(profile_res.endpoint)
+        .unwrap_or_else(|| "http://localhost:3030".to_string());
 
     print_info(
         "Scanning for records via snarkOS. This requires a locally running snarkOS \
@@ -1795,7 +1890,7 @@ fn handle_records_list(args: &RecordsListArgs, quiet: bool) -> Result<()> {
         "--end",
         &args.end.to_string(),
         "--endpoint",
-        &args.endpoint,
+        &endpoint,
     ]);
 
     let status = cmd.status().with_context(|| {
@@ -2424,19 +2519,46 @@ fn build_leo_run_args(
     args
 }
 
-fn handle_run(args: &RunArgs, quiet: bool) -> Result<()> {
+fn handle_run(args: &RunArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
     if !leo_cmd::leo_is_installed() {
         bail!(
             "leo is not installed or not on PATH. Install it with: cargo binstall leo-lang"
         );
     }
 
+    let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
+
+    // Resolve network: CLI --network > --profile > config > default (Testnet)
+    let network = args.network.clone().or(profile_res.network).or_else(|| {
+        cfg.default_network
+            .as_deref()
+            .and_then(parse_network)
+            .inspect(|n| {
+                if !quiet {
+                    let name = match n {
+                        Network::Testnet => "testnet",
+                        Network::Mainnet => "mainnet",
+                        Network::Canary => "canary",
+                    };
+                    println!(
+                        "{} Using default_network '{}' from aleo.toml",
+                        "[info]".cyan().bold(),
+                        name
+                    );
+                }
+            })
+    });
+
+    // Resolve endpoint: CLI --endpoint > --profile
+    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+
     let dir = args.path.as_deref();
     let extra_args = build_leo_run_args(
         &args.name,
         &args.inputs,
-        args.network.as_ref(),
-        args.endpoint.as_deref(),
+        network.as_ref(),
+        endpoint,
         &args.json_output,
     );
 
@@ -2444,15 +2566,41 @@ fn handle_run(args: &RunArgs, quiet: bool) -> Result<()> {
     leo_cmd::run_leo_with("run", &extra_args, dir)
 }
 
-fn handle_execute(args: &ExecuteArgs, quiet: bool) -> Result<()> {
+fn handle_execute(args: &ExecuteArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
     if !leo_cmd::leo_is_installed() {
         bail!(
             "leo is not installed or not on PATH. Install it with: cargo binstall leo-lang"
         );
     }
 
+    let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
+
+    // Resolve network: CLI --network > --profile > config > default (Testnet)
+    let network = args.network.clone().or(profile_res.network).or_else(|| {
+        cfg.default_network
+            .as_deref()
+            .and_then(parse_network)
+            .inspect(|n| {
+                if !quiet {
+                    let name = match n {
+                        Network::Testnet => "testnet",
+                        Network::Mainnet => "mainnet",
+                        Network::Canary => "canary",
+                    };
+                    println!(
+                        "{} Using default_network '{}' from aleo.toml",
+                        "[info]".cyan().bold(),
+                        name
+                    );
+                }
+            })
+    });
+
     let dir = args.path.as_deref();
-    let network = args.network.as_ref();
+
+    // Resolve endpoint: CLI --endpoint > --profile
+    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
 
     // Mainnet + broadcast: print informational warning (same pattern as deploy)
     if args.broadcast && matches!(network, Some(Network::Mainnet)) {
@@ -2466,8 +2614,8 @@ fn handle_execute(args: &ExecuteArgs, quiet: bool) -> Result<()> {
     let mut extra_args = build_leo_run_args(
         &args.name,
         &args.inputs,
-        network,
-        args.endpoint.as_deref(),
+        network.as_ref(),
+        endpoint,
         &args.json_output,
     );
 
