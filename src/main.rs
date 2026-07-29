@@ -1214,7 +1214,7 @@ fn handle_doctor(_args: &DoctorArgs, _quiet: bool) -> Result<()> {
     // 2. Windows-only: GNU vs MSVC check, dlltool, LIBCLANG_PATH
     if cfg!(windows) {
         let rustup_host = std::process::Command::new("rustup")
-            .args(["show", "default-host"])
+            .args(["default"])
             .output()
             .ok()
             .and_then(|o| {
