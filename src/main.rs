@@ -11,6 +11,39 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 // ---------------------------------------------------------------------------
+// Remote bindings: structs for parsed .aleo assembly
+// ---------------------------------------------------------------------------
+
+/// A single parameter extracted from .aleo assembly
+#[allow(dead_code)]
+struct AleoParam {
+    /// The Leo type string (e.g. "u64", "address", "credits.record")
+    param_type: String,
+    /// "public" or "private"
+    visibility: String,
+}
+
+/// A function extracted from .aleo assembly
+struct AleoFunction {
+    name: String,
+    inputs: Vec<AleoParam>,
+}
+
+/// Parameter info for the shared TS generation template
+struct FuncParam {
+    name: String,
+    ts_type: String,
+    converter_expr: String,
+    is_record: bool,
+}
+
+/// Function info for the shared TS generation template
+struct FuncInfo {
+    name: String,
+    params: Vec<FuncParam>,
+}
+
+// ---------------------------------------------------------------------------
 // Optional aleo.toml config file support
 // ---------------------------------------------------------------------------
 
@@ -566,6 +599,10 @@ struct InitArgs {
     /// Project template to use (defaults to 'payment', or to aleo.toml's default_template)
     #[arg(long = "template", value_parser = clap::value_parser!(Template))]
     template: Option<Template>,
+    /// Comma-separated workspace member names (e.g. "token,governance,treasury").
+    /// When set, creates a workspace root with workspace.json and scaffolds each member.
+    #[arg(long)]
+    workspace: Option<String>,
 }
 
 #[derive(Args)]
@@ -615,6 +652,12 @@ struct DeployArgs {
     /// Write command results as JSON (optionally --json-output=<FILE> for a custom path)
     #[arg(long)]
     json_output: Option<Option<PathBuf>>,
+    /// Target a specific workspace member by name (requires workspace root).
+    #[arg(long)]
+    package: Option<String>,
+    /// Deploy all workspace members sequentially (requires workspace root).
+    #[arg(long)]
+    all: bool,
 }
 
 #[derive(Args)]
@@ -632,11 +675,19 @@ struct FmtArgs {
 
 #[derive(Args)]
 struct BindingsArgs {
-    /// Path to the Aleo project directory
-    path: PathBuf,
+    /// Path to the Aleo project directory (required unless --remote is set)
+    #[arg(required_unless_present = "remote")]
+    path: Option<PathBuf>,
     /// Output path for the generated TypeScript file (defaults to <path>/bindings/<program_name>.ts)
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Remote program ID to generate bindings for (e.g. "credits.aleo").
+    /// When set, fetches the compiled program from the network instead of using a local project.
+    #[arg(long)]
+    remote: Option<String>,
+    /// Network to use for fetching the remote program (defaults to testnet)
+    #[arg(long, value_parser = clap::value_parser!(Network))]
+    network: Option<Network>,
 }
 
 #[derive(Args)]
@@ -764,6 +815,65 @@ fn handle_init(args: &InitArgs, quiet: bool) -> Result<()> {
         )
     })?;
 
+    // --- Workspace path ---
+    if let Some(ref workspace_names) = args.workspace {
+        let members: Vec<&str> = workspace_names
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if members.is_empty() {
+            bail!("Workspace must contain at least one member name");
+        }
+
+        let dest_dir = Path::new(&args.name);
+        if dest_dir.exists() {
+            bail!(
+                "Destination directory '{}' already exists -- not overwriting",
+                dest_dir.display()
+            );
+        }
+
+        fs::create_dir_all(dest_dir)?;
+
+        // Write workspace.json
+        let ws_json = serde_json::json!({ "members": members });
+        let ws_path = dest_dir.join("workspace.json");
+        let ws_content = serde_json::to_string_pretty(&ws_json)?;
+        fs::write(&ws_path, ws_content)?;
+
+        // Scaffold each member using the same template
+        for member_name in &members {
+            let member_id = member_name.replace('-', "_");
+            let member_dir = dest_dir.join(member_name);
+
+            for file in template.files {
+                let dest = member_dir.join(file.rel_path);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let substituted = file.contents.replace("{{PROJECT_NAME}}", &member_id);
+                fs::write(&dest, &substituted)?;
+            }
+        }
+
+        println!(
+            "{} Created workspace '{}' with {} member(s)",
+            "[done]".green().bold(),
+            args.name.cyan(),
+            members.len()
+        );
+        for member in &members {
+            println!("  - {}", member.cyan());
+        }
+        println!();
+        println!("  {} cd {}", "$".dimmed(), args.name);
+        println!("  {} leo build", "$".dimmed());
+
+        return Ok(());
+    }
+
+    // --- Single-project path (unchanged) ---
     let dest_dir = Path::new(&args.name);
     if dest_dir.exists() {
         bail!(
@@ -772,11 +882,8 @@ fn handle_init(args: &InitArgs, quiet: bool) -> Result<()> {
         );
     }
 
-    // Sanitize the project name for use as a program ID:
-    // hyphens are illegal in Aleo program identifiers.
     let program_id = args.name.replace('-', "_");
 
-    // Write each embedded template file to the destination with substitution.
     for file in template.files {
         let dest = dest_dir.join(file.rel_path);
 
@@ -964,6 +1071,127 @@ fn handle_deploy(args: &DeployArgs, quiet: bool) -> Result<()> {
         bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
     }
 
+    // --- Workspace detection ---
+    let target_dir = args.path.as_deref();
+    let ws_path = target_dir.map(|d| d.join("workspace.json"));
+    let is_workspace_root = ws_path
+        .as_ref()
+        .map(|p| p.exists())
+        .unwrap_or(false);
+
+    if is_workspace_root {
+        // Workspace root requires --package or --all
+        let has_package = args.package.is_some();
+        let deploy_all = args.all;
+
+        if !has_package && !deploy_all {
+            bail!(
+                "'{}' is a workspace root. Use --package <name> to deploy a specific member, \
+                 or --all to deploy all members sequentially.",
+                target_dir.unwrap().display()
+            );
+        }
+
+        // Read workspace.json to get member names
+        let ws_content = fs::read_to_string(ws_path.as_ref().unwrap())?;
+        let ws_json: serde_json::Value = serde_json::from_str(&ws_content)?;
+        let members: Vec<String> = ws_json["members"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if deploy_all {
+            // Loop through each member sequentially
+            for member in &members {
+                if args.broadcast && matches!(network, Network::Mainnet) {
+                    println!(
+                        "{} Deploying '{}' to MAINNET with --broadcast. This is irreversible and costs real fees.",
+                        "[warning]".yellow().bold(),
+                        member
+                    );
+                }
+
+                if !args.broadcast {
+                    print_info(
+                        &format!("Dry-run deploy for '{}' (no --broadcast)...", member),
+                        quiet,
+                    );
+                } else {
+                    print_info(
+                        &format!("Broadcasting deployment of '{}'...", member),
+                        quiet,
+                    );
+                }
+
+                let mut cmd = std::process::Command::new("leo");
+                cmd.args(["deploy", "--network", network_str, "-p", member]);
+
+                for flag in &leo_cmd::json_output_flag(&args.json_output) {
+                    cmd.arg(flag);
+                }
+
+                if let Some(path) = &args.path {
+                    cmd.args(["--path", &path.to_string_lossy()]);
+                }
+
+                if args.broadcast {
+                    cmd.arg("--broadcast");
+                }
+
+                let status = cmd.status().with_context(|| {
+                    format!("Failed to execute 'leo deploy -p {}'", member)
+                })?;
+
+                if !status.success() {
+                    let code = status.code().unwrap_or(-1);
+                    bail!("'leo deploy -p {}' failed with exit code {}", member, code);
+                }
+            }
+        } else if has_package {
+            // Deploy a single workspace member
+            let member = args.package.as_ref().unwrap();
+
+            if args.broadcast && matches!(network, Network::Mainnet) {
+                println!(
+                    "{} Deploying '{}' to MAINNET with --broadcast. This is irreversible and costs real fees.",
+                    "[warning]".yellow().bold(),
+                    member
+                );
+            }
+
+            let mut cmd = std::process::Command::new("leo");
+            cmd.args(["deploy", "--network", network_str, "-p", member]);
+
+            for flag in &leo_cmd::json_output_flag(&args.json_output) {
+                cmd.arg(flag);
+            }
+
+            if let Some(path) = &args.path {
+                cmd.args(["--path", &path.to_string_lossy()]);
+            }
+
+            if args.broadcast {
+                cmd.arg("--broadcast");
+            }
+
+            let status = cmd.status().with_context(|| {
+                format!("Failed to execute 'leo deploy -p {}'", member)
+            })?;
+
+            if !status.success() {
+                let code = status.code().unwrap_or(-1);
+                bail!("'leo deploy -p {}' failed with exit code {}", member, code);
+            }
+        }
+
+        return Ok(());
+    }
+
+    // --- Single-project path (unchanged) ---
     let json_flags = leo_cmd::json_output_flag(&args.json_output);
 
     // Mainnet + broadcast: print informational warning
@@ -992,7 +1220,6 @@ fn handle_deploy(args: &DeployArgs, quiet: bool) -> Result<()> {
         );
     }
 
-    // Build the leo command using --path as a CLI arg (matches leo deploy's own flags)
     let mut cmd = std::process::Command::new("leo");
     cmd.args(["deploy", "--network", network_str]);
 
@@ -1007,10 +1234,6 @@ fn handle_deploy(args: &DeployArgs, quiet: bool) -> Result<()> {
     if args.broadcast {
         cmd.arg("--broadcast");
     }
-
-    // Do NOT pass --yes to leo. Leo's own help text warns against it:
-    // "DO NOT SET THIS FLAG UNLESS YOU KNOW WHAT YOU ARE DOING"
-    // Let leo's own confirmation prompts surface via inherited stdout/stderr.
 
     let status = cmd.status().with_context(|| {
         format!("Failed to execute 'leo deploy --network {}'", network_str)
@@ -1071,65 +1294,218 @@ fn handle_records_list(args: &RecordsListArgs, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
-    let project_dir = &args.path;
-    if !project_dir.is_dir() {
-        bail!("Project directory '{}' does not exist", project_dir.display());
-    }
+// ---------------------------------------------------------------------------
+// Remote bindings: helpers for fetching and parsing .aleo assembly
+// ---------------------------------------------------------------------------
 
-    // Read program.json to get the program name
-    let program_json_path = project_dir.join("program.json");
-    let program_json_str = fs::read_to_string(&program_json_path)
-        .with_context(|| format!("Failed to read '{}'", program_json_path.display()))?;
-    let program_json: serde_json::Value = serde_json::from_str(&program_json_str)
-        .context("Failed to parse program.json")?;
-    let program_name = program_json["program"]
-        .as_str()
-        .context("program.json is missing the 'program' field")?;
-    let program_id = program_name.trim_end_matches(".aleo");
+/// Fetch a deployed program from the explorer API, with local caching.
+fn fetch_and_cache_program(
+    program_id: &str,
+    network: Network,
+    quiet: bool,
+) -> Result<String> {
+    let network_str = match network {
+        Network::Testnet => "testnet",
+        Network::Mainnet => "mainnet",
+        Network::Canary => "canary",
+    };
 
-    // Locate the ABI JSON file (generated by leo build)
-    let abi_path = project_dir.join("build").join(program_id).join("abi.json");
+    let cache_dir = Path::new(".aleoflow-cache").join(network_str);
+    let cache_path = cache_dir.join(program_id);
 
-    let abi_content = if abi_path.exists() {
-        fs::read_to_string(&abi_path)?
-    } else {
-        // Build first if ABI doesn't exist yet
+    // Check cache first
+    if cache_path.exists() {
+        let cached = fs::read_to_string(&cache_path)?;
         print_info(
             &format!(
-                "No ABI found at '{}'. Running 'leo build' first...",
-                abi_path.display()
+                "Using cached program '{}' from '{}'",
+                program_id,
+                cache_path.display()
             ),
             quiet,
         );
-        leo_cmd::run_leo("build", Some(project_dir))?;
-        if !abi_path.exists() {
-            bail!(
-                "ABI was not generated at '{}' after building. \
-                 Check that 'leo build' succeeds inside the project.",
-                abi_path.display()
-            );
-        }
-        fs::read_to_string(&abi_path)?
-    };
+        return Ok(cached);
+    }
 
-    let abi: serde_json::Value = serde_json::from_str(&abi_content)
-        .context("Failed to parse ABI JSON")?;
-    let functions = abi["functions"]
-        .as_array()
-        .context("ABI is missing 'functions' array")?;
+    // Fetch from network
+    let url = format!(
+        "https://api.explorer.provable.com/v1/{}/program/{}",
+        network_str, program_id
+    );
+    print_info(
+        &format!(
+            "Fetching program '{}' from {}",
+            program_id, url
+        ),
+        quiet,
+    );
 
-    // Read the Leo source file to extract parameter names and distinguish
-    // `transition`s (public, should be in bindings) from `fn`s (private, skipped).
-    // The ABI JSON does not preserve parameter names or kind (fn vs transition).
-    let leo_source_path = project_dir.join("src").join("main.leo");
-    let leo_source = if leo_source_path.exists() {
-        Some(fs::read_to_string(&leo_source_path)?)
+    let response = reqwest::blocking::get(&url)
+        .with_context(|| format!("Failed to fetch program from '{}'", url))?;
+
+    if !response.status().is_success() {
+        bail!(
+            "Failed to fetch program '{}' from {} (HTTP {})",
+            program_id, url, response.status()
+        );
+    }
+
+    let raw = response.text()?;
+
+    // The API response wraps the .aleo source in a JSON string literal.
+    // Strip surrounding quotes and unescape if needed.
+    let text = if raw.starts_with('"') && raw.ends_with('"') {
+        serde_json::from_str(&raw)
+            .unwrap_or(raw.trim_matches('"').to_string())
     } else {
-        None
+        raw
     };
 
-    // --- Generate TypeScript bindings ---
+    // Cache the result
+    fs::create_dir_all(&cache_dir)?;
+    fs::write(&cache_path, &text)?;
+    print_info(
+        &format!("Cached program to '{}'", cache_path.display()),
+        quiet,
+    );
+
+    Ok(text)
+}
+
+/// Parse .aleo assembly text and extract function/transition declarations with their
+/// input parameters. Uses register-based format:
+///   function <name>:
+///       input r0 as <type>.<visibility>;
+///       ...
+fn parse_aleo_assembly(text: &str) -> Vec<AleoFunction> {
+    let mut functions: Vec<AleoFunction> = Vec::new();
+
+    for (line_idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Match `function <name>:` or `transition <name>:` declarations
+        let is_function = trimmed.starts_with("function ")
+            || trimmed.starts_with("transition ");
+        if !is_function {
+            continue;
+        }
+
+        // Extract function name (stop at `:` or `(` or whitespace after keyword)
+        let after_keyword = if trimmed.starts_with("function ") {
+            &trimmed[9..]
+        } else {
+            &trimmed[11..] // "transition "
+        };
+        let name = after_keyword
+            .split(|c: char| c == ':' || c == '(' || c == ' ')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if name.is_empty() {
+            continue;
+        }
+
+        // Collect input lines until next function/record/struct/finalize/mapping/empty line
+        let mut inputs: Vec<AleoParam> = Vec::new();
+        let mut j = line_idx + 1;
+        while j < text.lines().count() {
+            let next_line = text.lines().nth(j).unwrap_or("").trim().to_string();
+
+            // Stop at known section boundaries
+            if next_line.starts_with("function ")
+                || next_line.starts_with("finalize ")
+                || next_line.starts_with("transition ")
+                || next_line.starts_with("record ")
+                || next_line.starts_with("struct ")
+                || next_line.starts_with("mapping ")
+                || next_line.starts_with("constructor")
+                || next_line.is_empty()
+            {
+                break;
+            }
+
+            // Parse `input r<N> as <type>.<visibility>;`
+            if let Some(rest) = next_line
+                .strip_prefix("input ")
+                .and_then(|s| s.find(" as ").map(|pos| (s, pos)))
+            {
+                let after_as = &rest.0[rest.1 + 4..]; // skip " as "
+                let ty_vis = after_as.trim_end_matches(';').trim();
+                if let Some(dot) = ty_vis.rfind('.') {
+                    let param_type = ty_vis[..dot].to_string();
+                    let visibility = ty_vis[dot + 1..].to_string();
+                    inputs.push(AleoParam {
+                        param_type,
+                        visibility,
+                    });
+                }
+            }
+
+            j += 1;
+        }
+
+        functions.push(AleoFunction {
+            name,
+            inputs,
+        });
+    }
+
+    functions
+}
+
+/// Map an .aleo assembly type string to a TypeScript type name.
+fn aleo_type_to_ts_type(ty: &str) -> &'static str {
+    match ty {
+        "address" => "string",
+        "boolean" => "boolean",
+        "u8" | "u16" | "u32" => "number",
+        "u64" | "u128" => "bigint",
+        "i8" | "i16" | "i32" => "number",
+        "i64" | "i128" => "bigint",
+        "field" | "scalar" => "bigint",
+        "group" | "signature" | "string" => "string",
+        _ => "string", // struct/record types pass through as strings
+    }
+}
+
+/// Build a converter expression for an .aleo assembly type string.
+fn aleo_type_converter(ty: &str, var_name: &str) -> String {
+    match ty {
+        "address" => var_name.to_string(),
+        "boolean" => format!("toBoolean({})", var_name),
+        "u8" => format!("toU8({})", var_name),
+        "u16" => format!("toU16({})", var_name),
+        "u32" => format!("toU32({})", var_name),
+        "u64" => format!("toU64({})", var_name),
+        "u128" => format!("toU128({})", var_name),
+        "i8" => format!("toI8({})", var_name),
+        "i16" => format!("toI16({})", var_name),
+        "i32" => format!("toI32({})", var_name),
+        "i64" => format!("toI64({})", var_name),
+        "i128" => format!("toI128({})", var_name),
+        "field" => format!("toField({})", var_name),
+        "scalar" => format!("toScalar({})", var_name),
+        "group" | "signature" | "string" => var_name.to_string(),
+        _ => format!("String({})", var_name),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared TypeScript binding generation template
+// ---------------------------------------------------------------------------
+
+/// Generate TypeScript bindings from parsed function info and write to disk.
+fn generate_ts_bindings(
+    program_name: &str,
+    program_id: &str,
+    functions: &[FuncInfo],
+    source_desc: &str,
+    network: &str,
+    output_path: &Path,
+    is_remote: bool,
+) -> Result<()> {
     let mut ts = String::new();
 
     // Header comment
@@ -1140,6 +1516,9 @@ fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
     ts.push_str("// This file generates real, API-correct execution calls based on the\n");
     ts.push_str("// documented buildExecutionTransaction interface from @provablehq/sdk.\n");
     ts.push_str("//\n");
+    ts.push_str(&format!("// Source: {} | Network: {}\n", source_desc, network));
+    ts.push_str(&format!("// Explorer: https://explorer.aleo.org/program/{}\n", program_name));
+    ts.push_str("//\n");
     ts.push_str("// REQUIRED ENVIRONMENT VARIABLES:\n");
     ts.push_str("//   PRIVATE_KEY    - The Aleo private key for transaction execution\n");
     ts.push_str("//   ALEO_ENDPOINT  - The Aleo network endpoint URL (e.g. https://api.provable.com/v2)\n");
@@ -1147,6 +1526,12 @@ fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
     ts.push_str("// Record-typed parameters need additional manual wiring -- see\n");
     ts.push_str("// https://developer.aleo.org/sdk/typescript/program_manager/ for details.\n");
     ts.push_str("//\n");
+    if is_remote {
+        ts.push_str("// Note: Parameter names are generic (arg0, arg1...) because compiled .aleo\n");
+        ts.push_str("// assembly does not preserve original source-level names. For\n");
+        ts.push_str("// semantically-named bindings, use --path <local_project> instead.\n");
+        ts.push_str("//\n");
+    }
     ts.push_str("// Generated by AleoFlow bindings\n");
     ts.push_str("\n");
 
@@ -1216,51 +1601,33 @@ fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
     ts.push_str("\n");
 
     for func in functions {
-        let name = func["name"].as_str().unwrap_or("unknown");
-        let inputs = func["inputs"].as_array().map(|v| &v[..]).unwrap_or(&[]);
-
-        // Extract real parameter names from the Leo source.
-        let param_names = leo_source.as_deref()
-            .and_then(|src| leo_param_names(src, name))
-            .unwrap_or_default();
-
-        // Build parameter list and conversion expressions
         let mut params: Vec<String> = Vec::new();
         let mut conversions: Vec<String> = Vec::new();
 
-        for (i, input) in inputs.iter().enumerate() {
-            let ts_type = param_leo_type(input);
-            let pname: String = param_names.get(i)
-                .cloned()
-                .unwrap_or_else(|| format!("arg{}", i));
+        for param in &func.params {
+            params.push(format!("{}: {}", param.name, param.ts_type));
 
-            params.push(format!("{}: {}", pname, ts_type));
-
-            if input.get("Record").is_some() {
-                // Record-typed parameter: skip conversion, add comment
+            if param.is_record {
                 conversions.push(format!(
                     "      // TODO: Record-typed input '{}' requires fetching via RecordProvider before use.\n      // See https://developer.aleo.org/sdk/typescript/program_manager/\n      {} as unknown as string",
-                    pname, pname
+                    param.name, param.name
                 ));
-            } else if let Some(pt) = input.get("Plaintext") {
-                let conv = leo_type_converter_expr(&pt["ty"], &pname);
-                conversions.push(format!("      {}", conv));
             } else {
-                conversions.push(format!("      String({})", pname));
+                conversions.push(format!("      {}", param.converter_expr));
             }
         }
 
-        ts.push_str(&format!("// {}\n", name));
+        ts.push_str(&format!("// {}\n", func.name));
         ts.push_str(&format!(
             "export async function {}(\n  {}\n): Promise<{{ success: true; txId: string }} | {{ success: false; error: string }}> {{\n",
-            name,
+            func.name,
             params.join(",\n  ")
         ));
         ts.push_str("  try {\n");
         ts.push_str("    const pm = await getProgramManager();\n");
         ts.push_str("    const tx = await pm.buildExecutionTransaction({\n");
         ts.push_str(&format!("      programName: \"{}\",\n", program_name));
-        ts.push_str(&format!("      functionName: \"{}\",\n", name));
+        ts.push_str(&format!("      functionName: \"{}\",\n", func.name));
         ts.push_str("      priorityFee: 0.0,\n");
         ts.push_str("      privateFee: false,\n");
         ts.push_str("      inputs: [\n");
@@ -1269,7 +1636,7 @@ fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
             ts.push_str(",\n");
         }
         ts.push_str("      ],\n");
-        ts.push_str(&format!("      keySearchParams: {{ cacheKey: \"{}:{}\" }},\n", program_id, name));
+        ts.push_str(&format!("      keySearchParams: {{ cacheKey: \"{}:{}\" }},\n", program_id, func.name));
         ts.push_str("    });\n");
         ts.push_str("    const txId = await pm.networkClient.submitTransaction(tx.toString());\n");
         ts.push_str("    return { success: true, txId };\n");
@@ -1279,21 +1646,12 @@ fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
         ts.push_str("}\n\n");
     }
 
-    // Determine output path
-    let output_path = if let Some(out) = &args.output {
-        out.clone()
-    } else {
-        project_dir
-            .join("bindings")
-            .join(format!("{}.ts", program_id))
-    };
-
     // Create parent directory
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    fs::write(&output_path, &ts).with_context(|| {
+    fs::write(output_path, &ts).with_context(|| {
         format!("Failed to write '{}'", output_path.display())
     })?;
 
@@ -1305,6 +1663,209 @@ fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
         functions.len()
     );
     println!("  Output: {}", output_path.display());
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Bindings command handler (local + remote)
+// ---------------------------------------------------------------------------
+
+fn handle_bindings(args: &BindingsArgs, quiet: bool) -> Result<()> {
+    // --- Remote path ---
+    if let Some(ref remote_program_id) = args.remote {
+        let network = args.network.clone().unwrap_or(Network::Testnet);
+        let network_str = match network {
+            Network::Testnet => "testnet",
+            Network::Mainnet => "mainnet",
+            Network::Canary => "canary",
+        };
+
+        // Determine source BEFORE fetching (fetch_and_cache_program writes cache)
+        let was_cached = Path::new(".aleoflow-cache")
+            .join(network_str)
+            .join(remote_program_id)
+            .exists();
+        let source_desc = if was_cached { "local cache" } else { "network fetch" };
+
+        // Fetch program text (cached or from network)
+        let text = fetch_and_cache_program(remote_program_id, network, quiet)?;
+
+        // Parse .aleo assembly
+        let aleo_funcs = parse_aleo_assembly(&text);
+
+        let program_name = remote_program_id.to_string();
+        let program_id = program_name.trim_end_matches(".aleo").to_string();
+
+        // Build FuncInfo from parsed AleoFunction
+        let mut func_infos: Vec<FuncInfo> = Vec::new();
+        for af in &aleo_funcs {
+            let mut params: Vec<FuncParam> = Vec::new();
+            for (i, input) in af.inputs.iter().enumerate() {
+                let is_record = input.param_type.contains(".record");
+                let ts_type = if is_record {
+                    format!(
+                        "string /* record {} */",
+                        input.param_type.trim_end_matches(".record")
+                    )
+                } else {
+                    aleo_type_to_ts_type(&input.param_type).to_string()
+                };
+                let converter_expr = if is_record {
+                    format!("{} as unknown as string", format!("arg{}", i))
+                } else {
+                    let clean_type = input.param_type.trim_end_matches(".public")
+                        .trim_end_matches(".private");
+                    aleo_type_converter(clean_type, &format!("arg{}", i))
+                };
+
+                params.push(FuncParam {
+                    name: format!("arg{}", i),
+                    ts_type,
+                    converter_expr,
+                    is_record,
+                });
+            }
+            func_infos.push(FuncInfo {
+                name: af.name.clone(),
+                params,
+            });
+        }
+
+        // Determine output path: bindings/<program_id>.ts in cwd
+        let output_path = if let Some(out) = &args.output {
+            out.clone()
+        } else {
+            Path::new("bindings").join(format!("{}.ts", program_id))
+        };
+
+        generate_ts_bindings(
+            &program_name,
+            &program_id,
+            &func_infos,
+            source_desc,
+            network_str,
+            &output_path,
+            true,
+        )?;
+
+        print_info(
+            "Remote bindings use generic parameter names (arg0, arg1...) since compiled \
+             bytecode does not preserve source-level names. Use --path <local_project> \
+             for named parameters.",
+            quiet,
+        );
+
+        return Ok(());
+    }
+
+    // --- Local path (unchanged behavior) ---
+    let project_dir = args.path.as_deref().context(
+        "Project path is required for local bindings"
+    )?;
+    if !project_dir.is_dir() {
+        bail!("Project directory '{}' does not exist", project_dir.display());
+    }
+
+    let program_json_path = project_dir.join("program.json");
+    let program_json_str = fs::read_to_string(&program_json_path)
+        .with_context(|| format!("Failed to read '{}'", program_json_path.display()))?;
+    let program_json: serde_json::Value = serde_json::from_str(&program_json_str)
+        .context("Failed to parse program.json")?;
+    let program_name = program_json["program"]
+        .as_str()
+        .context("program.json is missing the 'program' field")?;
+    let program_id = program_name.trim_end_matches(".aleo");
+
+    let abi_path = project_dir.join("build").join(program_id).join("abi.json");
+    let abi_content = if abi_path.exists() {
+        fs::read_to_string(&abi_path)?
+    } else {
+        print_info(
+            &format!("No ABI found at '{}'. Running 'leo build' first...", abi_path.display()),
+            quiet,
+        );
+        leo_cmd::run_leo("build", Some(project_dir))?;
+        if !abi_path.exists() {
+            bail!(
+                "ABI was not generated at '{}' after building. \
+                 Check that 'leo build' succeeds inside the project.",
+                abi_path.display()
+            );
+        }
+        fs::read_to_string(&abi_path)?
+    };
+
+    let abi: serde_json::Value = serde_json::from_str(&abi_content)
+        .context("Failed to parse ABI JSON")?;
+    let functions = abi["functions"]
+        .as_array()
+        .context("ABI is missing 'functions' array")?;
+
+    let leo_source_path = project_dir.join("src").join("main.leo");
+    let leo_source = if leo_source_path.exists() {
+        Some(fs::read_to_string(&leo_source_path)?)
+    } else {
+        None
+    };
+
+    // Build FuncInfo from local ABI functions
+    let mut func_infos: Vec<FuncInfo> = Vec::new();
+    for func in functions {
+        let name = func["name"].as_str().unwrap_or("unknown");
+        let inputs = func["inputs"].as_array().map(|v| &v[..]).unwrap_or(&[]);
+        let param_names = leo_source.as_deref()
+            .and_then(|src| leo_param_names(src, name))
+            .unwrap_or_default();
+
+        let mut params: Vec<FuncParam> = Vec::new();
+        for (i, input) in inputs.iter().enumerate() {
+            let ts_type = param_leo_type(input);
+            let pname: String = param_names.get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("arg{}", i));
+
+            let (converter_expr, is_record) = if input.get("Record").is_some() {
+                (format!(
+                    "// TODO: Record-typed input '{}' requires fetching via RecordProvider before use.\n      // See https://developer.aleo.org/sdk/typescript/program_manager/\n      {} as unknown as string",
+                    pname, pname
+                ), true)
+            } else if let Some(pt) = input.get("Plaintext") {
+                (leo_type_converter_expr(&pt["ty"], &pname), false)
+            } else {
+                (format!("String({})", pname), false)
+            };
+
+            params.push(FuncParam {
+                name: pname,
+                ts_type,
+                converter_expr,
+                is_record,
+            });
+        }
+        func_infos.push(FuncInfo {
+            name: name.to_string(),
+            params,
+        });
+    }
+
+    let output_path = if let Some(out) = &args.output {
+        out.clone()
+    } else {
+        project_dir
+            .join("bindings")
+            .join(format!("{}.ts", program_id))
+    };
+
+    generate_ts_bindings(
+        program_name,
+        program_id,
+        &func_infos,
+        "local build",
+        "local",
+        &output_path,
+        false,
+    )?;
 
     Ok(())
 }
