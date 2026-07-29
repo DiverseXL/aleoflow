@@ -977,6 +977,9 @@ struct DevnetArgs {
     /// Network to connect the devnet to (testnet, mainnet, canary)
     #[arg(long)]
     network: Option<Network>,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
     /// Write command results as JSON (optionally --json-output=<FILE> for a custom path)
     #[arg(long)]
     json_output: Option<Option<PathBuf>>,
@@ -1002,6 +1005,9 @@ struct DeployArgs {
     /// Deploy all workspace members sequentially (requires workspace root).
     #[arg(long)]
     all: bool,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
 }
 
 #[derive(Args)]
@@ -1628,6 +1634,9 @@ fn handle_devnet(args: &DevnetArgs, quiet: bool, profile: Option<&str>) -> Resul
             })
     });
 
+    // Resolve endpoint: CLI --endpoint > --profile
+    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+
     let json_flags = leo_cmd::json_output_flag(&args.json_output);
     if !json_flags.is_empty() {
         print_info(
@@ -1656,6 +1665,10 @@ fn handle_devnet(args: &DevnetArgs, quiet: bool, profile: Option<&str>) -> Resul
             Network::Canary => "canary",
         };
         cmd.args(["--network", net_str]);
+    }
+
+    if let Some(ep) = endpoint {
+        cmd.args(["--endpoint", ep]);
     }
 
     let status = cmd.status().with_context(|| {
@@ -1694,6 +1707,9 @@ fn handle_deploy(args: &DeployArgs, quiet: bool, profile: Option<&str>) -> Resul
                 }
             })
     }).unwrap_or(Network::Testnet);
+
+    // Resolve endpoint: CLI --endpoint > --profile
+    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
 
     let network_str = match network {
         Network::Testnet => "testnet",
@@ -1772,6 +1788,10 @@ fn handle_deploy(args: &DeployArgs, quiet: bool, profile: Option<&str>) -> Resul
                     cmd.args(["--path", &path.to_string_lossy()]);
                 }
 
+                if let Some(ep) = endpoint {
+                    cmd.args(["--endpoint", ep]);
+                }
+
                 if args.broadcast {
                     cmd.arg("--broadcast");
                 }
@@ -1806,6 +1826,10 @@ fn handle_deploy(args: &DeployArgs, quiet: bool, profile: Option<&str>) -> Resul
 
             if let Some(path) = &args.path {
                 cmd.args(["--path", &path.to_string_lossy()]);
+            }
+
+            if let Some(ep) = endpoint {
+                cmd.args(["--endpoint", ep]);
             }
 
             if args.broadcast {
@@ -1863,6 +1887,10 @@ fn handle_deploy(args: &DeployArgs, quiet: bool, profile: Option<&str>) -> Resul
 
     if let Some(path) = &args.path {
         cmd.args(["--path", &path.to_string_lossy()]);
+    }
+
+    if let Some(ep) = endpoint {
+        cmd.args(["--endpoint", ep]);
     }
 
     if args.broadcast {
