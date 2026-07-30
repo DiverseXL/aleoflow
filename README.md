@@ -145,7 +145,7 @@ system on top of it.
 
 ## Commands
 
-AleoFlow provides 14 top-level commands. The section below covers each one.
+AleoFlow provides 15 top-level commands. The section below covers each one.
 
 ### `aleoflow init <name> [--template <template>] [--workspace <members>]`
 
@@ -574,7 +574,9 @@ leo account new
 ```
 
 Save the printed private key, view key, and address somewhere safe. Then
-get testnet credits from the official faucet:
+get testnet credits -- `aleoflow faucet <ADDRESS>` opens the official
+faucet in your browser with the address pre-printed and copy-ready
+(see the [faucet section](#aleoflow-faucet-address) below):
 
 <https://faucet.aleo.org/>
 
@@ -602,6 +604,52 @@ dependency on the public API entirely, you can run a local devnet
 (`leo devnet --snarkos ./snarkos-bin --install`, then
 `leo devnet --path my-app --snarkos ./snarkos-bin`) and deploy against
 it with `aleoflow deploy ... --endpoint http://localhost:3030`.
+
+### `aleoflow faucet [address]`
+
+Opens the official Aleo testnet faucet (https://faucet.aleo.org/) in
+your default browser and prints the address in a copy-ready format, plus
+fallback alternatives if the primary faucet is slow or unavailable.
+
+The `address` argument is a positional, optional Aleo address. If
+omitted, the command prints a clear error with the correct usage.
+
+```
+aleoflow faucet aleo1064wgu5z5relqrhk6lv2ngr5zw5mf8eyp9sf03eu8q00mkv8zursd34fkt
+```
+
+**What it does:**
+
+- Prints the address on its own line for easy copying
+- Opens https://faucet.aleo.org/ in your default browser (using
+  `open` on macOS, `start` on Windows, `xdg-open` on Linux)
+- Displays a guidance message explaining how to complete the faucet
+  request
+- Lists alternative faucets: the Discord `#faucet` channel's
+  `/sendcredits` command (rate-limited to 50 credits/hour) and
+  Stakely's faucet (requires captcha + verification tweet)
+
+**What it does NOT do:**
+
+This is an intentional convenience wrapper, not a bypass of anti-bot
+protection. Aleo's faucets (official web form, Stakely with captcha +
+tweet verification) are deliberately not fully automatable, and
+AleoFlow does not attempt to circumvent that:
+
+- Does not submit the faucet form automatically
+- Does not solve captchas
+- Does not interact with Discord's API
+- Does not interact with Stakely's API
+
+If opening the browser fails (no default browser, running headless,
+etc.), AleoFlow prints the faucet URL so you can open it manually
+instead of failing with an error.
+
+No private key or sensitive data is involved -- this command only
+handles a public Aleo address.
+
+This command does not require a Leo project directory and works from
+anywhere.
 
 ## `--json-output` and CI use
 
@@ -711,6 +759,10 @@ suppressed — only informational status lines are silenced.
   snarkOS node.
 - `fmt` requires `leo-fmt` to be installed separately (not bundled with
   AleoFlow). Run `aleoflow doctor` to check if it is available.
+- `faucet` does not submit the faucet form or bypass captcha/verification
+  requirements -- it only opens the browser and prints the address together
+  with guidance. Aleo's faucets are deliberately bot-resistant, and
+  AleoFlow does not attempt to automate around those protections.
 
 ## License
 
