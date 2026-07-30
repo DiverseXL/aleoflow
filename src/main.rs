@@ -741,6 +741,47 @@ mod tests {
         assert_eq!(counts.warned, 0);
         assert_eq!(counts.failed, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // Private key format validation
+    // -----------------------------------------------------------------------
+
+    /// A valid-looking Aleo private key (59 chars, starts with APrivateKey1).
+    const VALID_KEY: &str = "APrivateKey1zkpGPDbTcP2rWRMFLa1quxwGMK2BNJ16HWjYjofTH1pMUYj";
+
+    #[test]
+    fn test_validate_private_key_valid() {
+        assert!(validate_private_key_format(VALID_KEY).is_none());
+    }
+
+    #[test]
+    fn test_validate_private_key_angle_brackets() {
+        let reason = validate_private_key_format("<fake-key>").unwrap();
+        assert!(reason.contains("'<'") || reason.contains("angle"));
+        // Also test the specific pattern from the spec: literal "<fake>"
+        let reason2 = validate_private_key_format("<fake>").unwrap();
+        assert!(reason2.contains("placeholder"));
+    }
+
+    #[test]
+    fn test_validate_private_key_wrong_prefix() {
+        let reason = validate_private_key_format("AViewKey1...").unwrap();
+        assert!(reason.contains("APrivateKey1"));
+    }
+
+    #[test]
+    fn test_validate_private_key_empty() {
+        let reason = validate_private_key_format("").unwrap();
+        assert!(reason.contains("APrivateKey1"));
+    }
+
+    #[test]
+    fn test_validate_private_key_wrong_length() {
+        // Valid prefix but truncated
+        let short = "APrivateKey1abc";
+        let reason = validate_private_key_format(short).unwrap();
+        assert!(reason.contains("length") || reason.contains("59"));
+    }
 }
 
 
@@ -794,6 +835,8 @@ enum Commands {
     /// Manage Aleo accounts: generate, import, sign, verify, and decrypt
     #[command(subcommand)]
     Account(AccountCmd),
+    /// Preview resolved configuration (network, endpoint, profile, env vars)
+    Env(EnvArgs),
     /// Query Aleo network state (block, transaction, program, stateroot, committee)
     #[command(subcommand)]
     Query(QueryCmd),
@@ -1112,6 +1155,19 @@ struct FaucetArgs {
     address: Option<String>,
 }
 
+#[derive(Args)]
+struct EnvArgs {
+    /// Named environment profile from aleo.toml
+    #[arg(long)]
+    profile: Option<String>,
+    /// Target network
+    #[arg(long, value_parser = clap::value_parser!(Network))]
+    network: Option<Network>,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Account command: nested subcommands mirroring the RecordsCmd pattern
 // ---------------------------------------------------------------------------
@@ -1251,6 +1307,7 @@ fn main() -> Result<()> {
         Commands::Faucet(args) => handle_faucet(args),
         Commands::Doctor(args) => handle_doctor(args, quiet),
         Commands::Account(cmd) => handle_account(cmd, quiet),
+        Commands::Env(args) => handle_env(args, quiet),
         Commands::Query(cmd) => handle_query(cmd, quiet, profile),
     }
 }
@@ -1501,6 +1558,34 @@ struct CheckCounts {
     failed: u32,
 }
 
+/// Validate that a private key string is not obviously malformed before
+/// passing it to a leo subprocess. Returns `None` if the key looks valid,
+/// or `Some(reason)` describing why it is invalid.
+///
+/// This is a quick sanity check, not a cryptographic verification.
+/// We never print the actual key value in the error message.
+fn validate_private_key_format(key: &str) -> Option<&'static str> {
+    if key.contains('<') || key.contains('>') {
+        return Some(
+            "The provided private key doesn't look valid: contains '<' or '>' characters, \
+             which usually means a placeholder was pasted by mistake instead of a real key."
+        );
+    }
+    if !key.starts_with("APrivateKey1") {
+        return Some(
+            "The provided private key doesn't look valid: it should start with \
+             'APrivateKey1'. Make sure you are using a real Aleo private key."
+        );
+    }
+    if key.len() != 59 {
+        return Some(
+            "The provided private key doesn't look valid: wrong length. \
+             A valid Aleo private key is exactly 59 characters."
+        );
+    }
+    None
+}
+
 fn handle_doctor(_args: &DoctorArgs, _quiet: bool) -> Result<()> {
     let mut counts = CheckCounts::default();
 
@@ -1602,7 +1687,85 @@ fn handle_doctor(_args: &DoctorArgs, _quiet: bool) -> Result<()> {
     doctor_check("NETWORK", if net_set { "pass" } else { "warn" }, if net_set { "set" } else { "not set" }, &mut counts);
     doctor_check("ENDPOINT", if ep_set { "pass" } else { "warn" }, if ep_set { "set" } else { "not set" }, &mut counts);
 
-    // 7. Summary
+    // 7. Git repository check (Feature 2)
+    // This is a real incident-derived check: a disconnected, non-git folder
+    // silently absorbed real work earlier in this project's own development.
+    let git_work_tree = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    match git_work_tree {
+        Some(ref val) if val == "true" => {
+            doctor_check(
+                "git repo",
+                "pass",
+                "current directory is inside a git repository",
+                &mut counts,
+            );
+            // Additional check: does this repo have a remote configured?
+            let remote_output = std::process::Command::new("git")
+                .args(["remote", "-v"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if s.is_empty() { None } else { Some(s) }
+                    } else {
+                        None
+                    }
+                });
+            match remote_output {
+                Some(_) => {
+                    doctor_check("git remote", "pass", "remote is configured", &mut counts);
+                }
+                None => {
+                    doctor_check(
+                        "git remote",
+                        "warn",
+                        "no remote configured -- repo is local-only and not backed up",
+                        &mut counts,
+                    );
+                }
+            }
+        }
+        _ => {
+            doctor_check(
+                "git repo",
+                "warn",
+                "current directory is not a git repository. If you are actively \
+                 developing here, consider running 'git init' -- uncommitted work \
+                 outside version control can be lost if files are moved, deleted, \
+                 or overwritten.",
+                &mut counts,
+            );
+        }
+    }
+
+    // 8. Stale-PATH detection (Feature 4)
+    // For each tool (leo, snarkos, leo-fmt), we check whether it resolves on PATH.
+    // If a tool is NOT found on PATH, we would ideally check if the binary exists
+    // at a known install location (e.g. ~/.cargo/bin/leo) but is missing from the
+    // current PATH. However, there is no reliable cross-platform way to enumerate
+    // likely install directories without OS-specific search heuristics that risk
+    // false positives (e.g. searching the entire filesystem, guessing at prefix
+    // paths). Common locations like ~/.cargo/bin may not be correct for all
+    // installations (brew on macOS, cargo-binstall elsewhere, manual installs).
+    // Skipping this check to avoid misleading output.
+    //
+    // If we ever add a config option for a custom install path, we could revisit
+    // this. For now, `doctor` already tells users when a tool is not on PATH
+    // and how to install it.
+
+    // 9. Summary
     println!();
     println!(
         "{} {} checks run, {} passed, {} warned, {} failed",
@@ -2252,6 +2415,13 @@ fn handle_account_import(args: &AccountImportArgs, quiet: bool) -> Result<()> {
         bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
     }
 
+    // Validate private key format before shelling out to leo
+    if let Some(ref pk) = args.private_key {
+        if let Some(reason) = validate_private_key_format(pk) {
+            bail!("{}", reason);
+        }
+    }
+
     let mut cmd = std::process::Command::new("leo");
     cmd.args(["account", "import"]);
 
@@ -2283,6 +2453,13 @@ fn handle_account_import(args: &AccountImportArgs, quiet: bool) -> Result<()> {
 fn handle_account_sign(args: &AccountSignArgs, quiet: bool) -> Result<()> {
     if !leo_cmd::leo_is_installed() {
         bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    // Validate private key format before shelling out to leo
+    if let Some(ref pk) = args.private_key {
+        if let Some(reason) = validate_private_key_format(pk) {
+            bail!("{}", reason);
+        }
     }
 
     let mut cmd = std::process::Command::new("leo");
@@ -2340,6 +2517,25 @@ fn handle_account_verify(args: &AccountVerifyArgs, quiet: bool) -> Result<()> {
 fn handle_account_decrypt(args: &AccountDecryptArgs, quiet: bool) -> Result<()> {
     if !leo_cmd::leo_is_installed() {
         bail!("leo is not installed or not on PATH. Install it with: cargo binstall leo-lang");
+    }
+
+    // Validate key format before shelling out to leo.
+    // The -k flag can be either a private key (APrivateKey1...) or a view key
+    // (AViewKey1...), so we check both prefixes.
+    if let Some(ref key) = args.key {
+        let is_valid = key.starts_with("APrivateKey1") || key.starts_with("AViewKey1");
+        if key.contains('<') || key.contains('>') {
+            bail!(
+                "The provided key doesn't look valid: contains '<' or '>' characters, \
+                 which usually means a placeholder was pasted by mistake instead of a real key."
+            );
+        }
+        if !is_valid {
+            bail!(
+                "The provided key doesn't look valid: it should start with \
+                 'APrivateKey1' (private key) or 'AViewKey1' (view key)."
+            );
+        }
     }
 
     let mut cmd = std::process::Command::new("leo");
@@ -4234,6 +4430,112 @@ fn open_url(url: &str) {
             );
         }
     }
+}
+
+/// Handle `aleoflow env [--profile <name>] [--network <net>] [--endpoint <url>]`.
+/// Resolves and prints ALL effective configuration AleoFlow would use,
+/// without actually running any command.
+fn handle_env(args: &EnvArgs, quiet: bool) -> Result<()> {
+    let cfg = load_aleoflow_config();
+
+    // Resolve profile to get its network/endpoint values.
+    // Profile resolution errors are non-fatal here -- we just treat it as "no profile".
+    let profile_res = resolve_profile(args.profile.as_deref(), &cfg, true).unwrap_or_else(|_| {
+        ProfileResolution { network: None, endpoint: None }
+    });
+
+    let config_path = Path::new("aleo.toml");
+    let config_exists = config_path.exists();
+
+    // Resolve network: CLI --network > --profile > config > built-in default
+    // Compute source label BEFORE consuming the values.
+    let has_cli_network = args.network.is_some();
+    let has_profile_network = profile_res.network.is_some();
+    let has_config_network = cfg.default_network.is_some();
+
+    let network = args.network.clone().or_else(|| profile_res.network.clone()).or_else(|| {
+        cfg.default_network.as_deref().and_then(parse_network)
+    });
+
+    let endpoint = args.endpoint.as_deref()
+        .or_else(|| profile_res.endpoint.as_deref())
+        .map(|s| s.to_string());
+
+    let _has_cli_endpoint = args.endpoint.is_some();
+    let _has_profile_endpoint = profile_res.endpoint.is_some();
+
+    // If a profile was requested but resolution failed, warn the user
+    if let Some(ref pname) = args.profile {
+        let profile_valid = cfg.profiles.as_ref().and_then(|p| p.get(pname)).is_some();
+        if !profile_valid {
+            eprintln!(
+                "[warning] Profile '{}' was not found in aleo.toml. Configuration \
+                 will use built-in defaults instead.",
+                pname
+            );
+        }
+    }
+
+    println!("AleoFlow Configuration Preview");
+    println!("-------------------------------");
+
+    // Network and source
+    let net_src = if has_cli_network {
+        "CLI --network flag"
+    } else if has_profile_network {
+        "--profile"
+    } else if has_config_network && network.is_some() {
+        "aleo.toml default_network"
+    } else {
+        "built-in default (testnet)"
+    };
+    let net_display = network
+        .as_ref()
+        .map(|n| match n {
+            Network::Testnet => "testnet",
+            Network::Mainnet => "mainnet",
+            Network::Canary => "canary",
+        })
+        .unwrap_or("testnet");
+    println!("  Network:   {} (from: {})", net_display, net_src);
+
+    // Endpoint and source
+    let ep_src = if args.endpoint.is_some() {
+        "CLI --endpoint flag"
+    } else if args.profile.is_some() && profile_res.endpoint.is_some() {
+        "--profile"
+    } else {
+        "none (leo will use its own default)"
+    };
+    let ep_display = endpoint.as_deref().unwrap_or("(none -- leo default)");
+    println!("  Endpoint:  {} (from: {})", ep_display, ep_src);
+
+    // PRIVATE_KEY status
+    let pk_set = std::env::var("PRIVATE_KEY").is_ok();
+    println!("  PRIVATE_KEY: {}", if pk_set { "set" } else { "not set" });
+
+    // Active profile
+    match args.profile.as_deref() {
+        Some(name) => println!("  Profile:   {} (active via --profile)", name),
+        None => println!("  Profile:   (none)"),
+    }
+
+    // aleo.toml path
+    if config_exists {
+        println!("  Config:    {} (found, being read)", config_path.display());
+    } else {
+        println!("  Config:    none found (using built-in defaults)");
+    }
+
+    if !quiet {
+        println!();
+        println!(
+            "{} This is a preview only -- no command was executed.",
+            "[info]".cyan().bold()
+        );
+    }
+
+    Ok(())
 }
 
 /// Handle `aleoflow faucet [address]`.
