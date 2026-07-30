@@ -787,6 +787,8 @@ enum Commands {
     /// Scan, list, and manage Aleo records via snarkOS
     #[command(subcommand)]
     Records(RecordsCmd),
+    /// Open the Aleo faucet in your browser for testnet credits
+    Faucet(FaucetArgs),
     /// Diagnose the local Aleo development environment
     Doctor(DoctorArgs),
     /// Manage Aleo accounts: generate, import, sign, verify, and decrypt
@@ -1104,6 +1106,12 @@ struct DoctorArgs {
     // No arguments needed; doctor diagnoses the environment automatically.
 }
 
+#[derive(Args)]
+struct FaucetArgs {
+    /// Aleo address to request testnet credits for
+    address: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Account command: nested subcommands mirroring the RecordsCmd pattern
 // ---------------------------------------------------------------------------
@@ -1240,6 +1248,7 @@ fn main() -> Result<()> {
         Commands::Run(args) => handle_run(args, quiet, profile),
         Commands::Execute(args) => handle_execute(args, quiet, profile),
         Commands::Records(cmd) => handle_records(cmd, quiet, profile),
+        Commands::Faucet(args) => handle_faucet(args),
         Commands::Doctor(args) => handle_doctor(args, quiet),
         Commands::Account(cmd) => handle_account(cmd, quiet),
         Commands::Query(cmd) => handle_query(cmd, quiet, profile),
@@ -4184,6 +4193,96 @@ fn handle_audit(args: &AuditArgs, quiet: bool) -> Result<()> {
             "[info]".dimmed()
         );
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Faucet command: opens the Aleo testnet faucet in the user's browser
+// ---------------------------------------------------------------------------
+
+/// Open a URL in the user's default browser using the platform-specific command.
+/// Falls back gracefully (prints the URL) if opening fails.
+///
+/// This is an intentional convenience wrapper, NOT a bypass of anti-bot protection.
+/// Aleo's faucets (official web form, Stakely with captcha+tweet verification) are
+/// deliberately not fully automatable, and this command must not attempt to
+/// circumvent that. We only open a browser and print guidance.
+fn open_url(url: &str) {
+    let result = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).status()
+    } else if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", url])
+            .status()
+    } else {
+        // Linux and other Unix-likes
+        std::process::Command::new("xdg-open").arg(url).status()
+    };
+
+    match result {
+        Ok(status) if status.success() => {}
+        _ => {
+            // If opening the browser fails for any reason (no default browser,
+            // running headless, etc.), don't error out -- just print the URL
+            // so the user can open it manually.
+            eprintln!(
+                "Could not open your browser automatically.\n\
+                 Open this URL manually:\n\
+                 {}",
+                url
+            );
+        }
+    }
+}
+
+/// Handle `aleoflow faucet [address]`.
+/// Always opens the official Aleo faucet in the browser and prints guidance.
+/// Never attempts to submit forms, solve captchas, or interact with APIs.
+fn handle_faucet(args: &FaucetArgs) -> Result<()> {
+    // Check if an address was provided. There's no existing pattern for reading
+    // a saved address from env/.env in this codebase (PRIVATE_KEY is read for
+    // account operations, but no ADDRESS variable is defined), so we require
+    // the user to pass it explicitly.
+    let address = match &args.address {
+        Some(addr) => addr.clone(),
+        None => {
+            bail!(
+                "No address provided. Usage: aleoflow faucet <ADDRESS>\n\
+                 Example: aleoflow faucet aleo1064wgu5z5relqrhk6lv2ngr5zw5mf8eyp9sf03eu8q00mkv8zursd34fkt\n\
+                 Pass your Aleo testnet address as the argument."
+            );
+        }
+    };
+
+    // Print the address clearly, on its own line, copy-ready
+    println!("Requesting testnet credits for:");
+    println!("{}", address);
+    println!();
+
+    // Open the faucet in the browser
+    let faucet_url = "https://faucet.aleo.org/";
+    open_url(faucet_url);
+
+    // Print guidance message
+    println!(
+        "Faucet opened in your browser. Paste your address above, \
+         complete verification, and tokens typically arrive within a few minutes."
+    );
+    println!();
+
+    // Print fallback alternatives
+    println!(
+        "If this faucet is slow or unavailable, alternatives:"
+    );
+    println!(
+        "  - Discord #faucet channel: use '/sendcredits <address> <amount>', \
+         limited to 50 credits/hour"
+    );
+    println!(
+        "  - https://stakely.io/faucet/aleo-aleo-testnet \
+         (requires solving a captcha and posting a verification tweet)"
+    );
 
     Ok(())
 }
