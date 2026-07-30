@@ -1157,9 +1157,6 @@ struct FaucetArgs {
 
 #[derive(Args)]
 struct EnvArgs {
-    /// Named environment profile from aleo.toml
-    #[arg(long)]
-    profile: Option<String>,
     /// Target network
     #[arg(long, value_parser = clap::value_parser!(Network))]
     network: Option<Network>,
@@ -1307,7 +1304,7 @@ fn main() -> Result<()> {
         Commands::Faucet(args) => handle_faucet(args),
         Commands::Doctor(args) => handle_doctor(args, quiet),
         Commands::Account(cmd) => handle_account(cmd, quiet),
-        Commands::Env(args) => handle_env(args, quiet),
+        Commands::Env(args) => handle_env(args, quiet, profile),
         Commands::Query(cmd) => handle_query(cmd, quiet, profile),
     }
 }
@@ -4435,12 +4432,11 @@ fn open_url(url: &str) {
 /// Handle `aleoflow env [--profile <name>] [--network <net>] [--endpoint <url>]`.
 /// Resolves and prints ALL effective configuration AleoFlow would use,
 /// without actually running any command.
-fn handle_env(args: &EnvArgs, quiet: bool) -> Result<()> {
+fn handle_env(args: &EnvArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
     let cfg = load_aleoflow_config();
 
-    // Resolve profile to get its network/endpoint values.
-    // Profile resolution errors are non-fatal here -- we just treat it as "no profile".
-    let profile_res = resolve_profile(args.profile.as_deref(), &cfg, true).unwrap_or_else(|_| {
+    // Profile comes from the global --profile flag (same as other commands).
+    let profile_res = resolve_profile(profile, &cfg, true).unwrap_or_else(|_| {
         ProfileResolution { network: None, endpoint: None }
     });
 
@@ -4448,7 +4444,6 @@ fn handle_env(args: &EnvArgs, quiet: bool) -> Result<()> {
     let config_exists = config_path.exists();
 
     // Resolve network: CLI --network > --profile > config > built-in default
-    // Compute source label BEFORE consuming the values.
     let has_cli_network = args.network.is_some();
     let has_profile_network = profile_res.network.is_some();
     let has_config_network = cfg.default_network.is_some();
@@ -4465,7 +4460,7 @@ fn handle_env(args: &EnvArgs, quiet: bool) -> Result<()> {
     let _has_profile_endpoint = profile_res.endpoint.is_some();
 
     // If a profile was requested but resolution failed, warn the user
-    if let Some(ref pname) = args.profile {
+    if let Some(pname) = profile {
         let profile_valid = cfg.profiles.as_ref().and_then(|p| p.get(pname)).is_some();
         if !profile_valid {
             eprintln!(
@@ -4502,7 +4497,7 @@ fn handle_env(args: &EnvArgs, quiet: bool) -> Result<()> {
     // Endpoint and source
     let ep_src = if args.endpoint.is_some() {
         "CLI --endpoint flag"
-    } else if args.profile.is_some() && profile_res.endpoint.is_some() {
+    } else if profile.is_some() && profile_res.endpoint.is_some() {
         "--profile"
     } else {
         "none (leo will use its own default)"
@@ -4515,7 +4510,7 @@ fn handle_env(args: &EnvArgs, quiet: bool) -> Result<()> {
     println!("  PRIVATE_KEY: {}", if pk_set { "set" } else { "not set" });
 
     // Active profile
-    match args.profile.as_deref() {
+    match profile {
         Some(name) => println!("  Profile:   {} (active via --profile)", name),
         None => println!("  Profile:   (none)"),
     }
