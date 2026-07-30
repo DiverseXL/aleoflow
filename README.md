@@ -418,6 +418,11 @@ aleoflow doctor
 5. **leo-fmt** — present on PATH (warn-only; leo-fmt is optional)
 6. **Environment variables** — `PRIVATE_KEY`, `NETWORK`, `ENDPOINT` set/unset
    (checks presence only; never prints or logs their values)
+7. **Git repository** — whether the current directory is inside a git
+   repository (WARN if not, based on a real incident where work was lost
+   outside version control)
+8. **Git remote** — if inside a git repo, whether a remote is configured
+   (WARN if local-only/unbacked-up)
 
 Each check shows a `[done]`, `[warning]`, or `[error]` status with an
 actionable message when something is wrong. The summary line reports the
@@ -550,6 +555,37 @@ Query the current committee information.
 ```
 aleoflow query committee
 ```
+
+### `aleoflow env [--network <network>] [--endpoint <url>]`
+
+Preview the resolved configuration AleoFlow would use for a command,
+without actually running anything. Shows each setting and where it came
+from. This is useful for debugging configuration issues -- it directly
+addresses endpoint-precedence bugs (invisible until a command fails) and
+PRIVATE_KEY confusion (not knowing if it is actually set in the current
+shell session).
+
+```
+aleoflow env
+aleoflow env --profile mainnet
+aleoflow env --network testnet --endpoint http://localhost:3030
+```
+
+**What it shows:**
+
+- **Network** -- the resolved network name (testnet, mainnet, canary) and
+  the source it came from (CLI `--network` flag > `--profile` >
+  aleo.toml `default_network` > built-in default)
+- **Endpoint** -- the resolved endpoint URL and its source
+- **PRIVATE_KEY** -- whether the environment variable is set (yes/no
+  only; never prints the value)
+- **Profile** -- which named profile (if any) is active
+- **Config** -- path to `aleo.toml` being read, or `none found (using
+  built-in defaults)`
+
+Accepts the same `--profile`, `--network`, and `--endpoint` flags as
+other commands, so you can preview "what would happen if I ran X with
+these flags" before actually running anything.
 
 ## Proof of deployment
 
@@ -716,7 +752,7 @@ If the profile name does not exist, AleoFlow prints a clear error listing
 all available profiles.
 
 Profiles are available on: `deploy`, `devnet`, `run`, `execute`, `query`,
-and `records list`.
+`records list`, and `env`.
 
 > [!IMPORTANT]
 > Never store private keys in `aleo.toml`. Use `.env` files or shell
