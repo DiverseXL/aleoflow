@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_build_leo_run_args_name_only() {
-        let args = build_leo_run_args("main", &[], None, None, &None);
+        let args = build_leo_run_args("main", &[], None, None, &None, None);
         assert_eq!(args, vec!["main"]);
     }
 
@@ -621,6 +621,7 @@ mod tests {
             None,
             None,
             &None,
+            None,
         );
         assert_eq!(args, vec!["transfer", "1u32", "aleo1abc"]);
     }
@@ -633,6 +634,7 @@ mod tests {
             Some(&Network::Testnet),
             None,
             &None,
+            None,
         );
         assert_eq!(args, vec!["main", "--network", "testnet"]);
     }
@@ -645,6 +647,7 @@ mod tests {
             None,
             Some("http://localhost:3030"),
             &Some(None),
+            None,
         );
         assert_eq!(
             args,
@@ -660,6 +663,7 @@ mod tests {
             Some(&Network::Mainnet),
             Some("https://api.provable.com/v2"),
             &Some(Some(PathBuf::from("/tmp/out.json"))),
+            None,
         );
         assert_eq!(
             args,
@@ -672,6 +676,26 @@ mod tests {
                 "--endpoint",
                 "https://api.provable.com/v2",
                 "--json-output=/tmp/out.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_leo_run_args_with_private_key() {
+        let args = build_leo_run_args(
+            "main",
+            &[],
+            None,
+            None,
+            &None,
+            Some("APrivateKey1zkpGPDbTcP2rWRMFLa1quxwGMK2BNJ16HWjYjofTH1pMUYj"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "main",
+                "--private-key",
+                "APrivateKey1zkpGPDbTcP2rWRMFLa1quxwGMK2BNJ16HWjYjofTH1pMUYj",
             ]
         );
     }
@@ -1067,6 +1091,9 @@ struct DeployArgs {
     /// Aleo network endpoint URL
     #[arg(long)]
     endpoint: Option<String>,
+    /// Account private key for deployment
+    #[arg(long)]
+    pub private_key: Option<String>,
 }
 
 #[derive(Args)]
@@ -1118,6 +1145,9 @@ struct RunArgs {
     /// Write command results as JSON (optionally --json-output=<FILE> for a custom path)
     #[arg(long)]
     json_output: Option<Option<PathBuf>>,
+    /// Account private key for execution
+    #[arg(long)]
+    pub private_key: Option<String>,
 }
 
 #[derive(Args)]
@@ -1142,6 +1172,9 @@ struct ExecuteArgs {
     /// Write command results as JSON (optionally --json-output=<FILE> for a custom path)
     #[arg(long)]
     json_output: Option<Option<PathBuf>>,
+    /// Account private key for execution
+    #[arg(long)]
+    pub private_key: Option<String>,
 }
 
 #[derive(Args)]
@@ -1871,6 +1904,13 @@ fn handle_devnet(args: &DevnetArgs, quiet: bool, profile: Option<&str>) -> Resul
 }
 
 fn handle_deploy(args: &DeployArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
+    // Validate private key format before any subprocess runs
+    if let Some(ref pk) = args.private_key {
+        if let Some(reason) = validate_private_key_format(pk) {
+            bail!("{}", reason);
+        }
+    }
+
     let cfg = load_aleoflow_config();
     let profile_res = resolve_profile(profile, &cfg, quiet)?;
 
@@ -1971,6 +2011,10 @@ fn handle_deploy(args: &DeployArgs, quiet: bool, profile: Option<&str>) -> Resul
                     cmd.arg(flag);
                 }
 
+                if let Some(pk) = &args.private_key {
+                    cmd.args(["--private-key", pk]);
+                }
+
                 if let Some(path) = &args.path {
                     cmd.args(["--path", &path.to_string_lossy()]);
                 }
@@ -2009,6 +2053,10 @@ fn handle_deploy(args: &DeployArgs, quiet: bool, profile: Option<&str>) -> Resul
 
             for flag in &leo_cmd::json_output_flag(&args.json_output) {
                 cmd.arg(flag);
+            }
+
+            if let Some(pk) = &args.private_key {
+                cmd.args(["--private-key", pk]);
             }
 
             if let Some(path) = &args.path {
@@ -2070,6 +2118,10 @@ fn handle_deploy(args: &DeployArgs, quiet: bool, profile: Option<&str>) -> Resul
 
     for flag in &json_flags {
         cmd.arg(flag);
+    }
+
+    if let Some(pk) = &args.private_key {
+        cmd.args(["--private-key", pk]);
     }
 
     if let Some(path) = &args.path {
@@ -2517,21 +2569,20 @@ fn handle_account_decrypt(args: &AccountDecryptArgs, quiet: bool) -> Result<()> 
     }
 
     // Validate key format before shelling out to leo.
-    // The -k flag can be either a private key (APrivateKey1...) or a view key
-    // (AViewKey1...), so we check both prefixes.
+    // Use the shared function for the angle-bracket / placeholder check,
+    // then allow both private key (APrivateKey1...) and view key (AViewKey1...) prefixes.
     if let Some(ref key) = args.key {
-        let is_valid = key.starts_with("APrivateKey1") || key.starts_with("AViewKey1");
-        if key.contains('<') || key.contains('>') {
-            bail!(
-                "The provided key doesn't look valid: contains '<' or '>' characters, \
-                 which usually means a placeholder was pasted by mistake instead of a real key."
-            );
-        }
-        if !is_valid {
-            bail!(
-                "The provided key doesn't look valid: it should start with \
-                 'APrivateKey1' (private key) or 'AViewKey1' (view key)."
-            );
+        // Delegate placeholder detection to the shared validation function
+        if let Some(reason) = validate_private_key_format(key) {
+            // If it's just a prefix/length error, that's OK for view keys;
+            // only bail if it's an angle-bracket placeholder issue.
+            if reason.contains('<') || reason.contains('>') || reason.contains("placeholder") {
+                bail!("{}", reason);
+            }
+            // For prefix/length errors, also allow view key prefix
+            if !key.starts_with("AViewKey1") {
+                bail!("{}", reason);
+            }
         }
     }
 
@@ -3194,9 +3245,15 @@ fn build_leo_run_args(
     network: Option<&Network>,
     endpoint: Option<&str>,
     json_output: &Option<Option<PathBuf>>,
+    private_key: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![name.to_string()];
     args.extend(inputs.iter().cloned());
+
+    if let Some(pk) = private_key {
+        args.push("--private-key".to_string());
+        args.push(pk.to_string());
+    }
 
     if let Some(net) = network {
         let net_str = match net {
@@ -3412,6 +3469,13 @@ fn translate_run_execute_error(stderr: &str, func_name: &str, project_dir: Optio
 }
 
 fn handle_run(args: &RunArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
+    // Validate private key format before any subprocess runs
+    if let Some(ref pk) = args.private_key {
+        if let Some(reason) = validate_private_key_format(pk) {
+            bail!("{}", reason);
+        }
+    }
+
     if !leo_cmd::leo_is_installed() {
         bail!(
             "leo is not installed or not on PATH. Install it with: cargo binstall leo-lang"
@@ -3446,12 +3510,14 @@ fn handle_run(args: &RunArgs, quiet: bool, profile: Option<&str>) -> Result<()> 
     let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
 
     let dir = args.path.as_deref();
+    let private_key = args.private_key.as_deref();
     let extra_args = build_leo_run_args(
         &args.name,
         &args.inputs,
         network.as_ref(),
         endpoint,
         &args.json_output,
+        private_key,
     );
 
     print_info(&format!("Running 'leo run {}'...", args.name), quiet);
@@ -3465,6 +3531,13 @@ fn handle_run(args: &RunArgs, quiet: bool, profile: Option<&str>) -> Result<()> 
 }
 
 fn handle_execute(args: &ExecuteArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
+    // Validate private key format before any subprocess runs
+    if let Some(ref pk) = args.private_key {
+        if let Some(reason) = validate_private_key_format(pk) {
+            bail!("{}", reason);
+        }
+    }
+
     if !leo_cmd::leo_is_installed() {
         bail!(
             "leo is not installed or not on PATH. Install it with: cargo binstall leo-lang"
@@ -3509,12 +3582,14 @@ fn handle_execute(args: &ExecuteArgs, quiet: bool, profile: Option<&str>) -> Res
         );
     }
 
+    let private_key = args.private_key.as_deref();
     let mut extra_args = build_leo_run_args(
         &args.name,
         &args.inputs,
         network.as_ref(),
         endpoint,
         &args.json_output,
+        private_key,
     );
 
     if args.broadcast {
