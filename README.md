@@ -155,6 +155,7 @@ Scaffolds a new Aleo project from a built-in template. Templates:
 - `defi` — deposit / withdraw pair
 - `ai-agent` — simple agent state record + inference stub
 - `gamefi` — player state / score submission record
+- `token` — fungible token following the community-standard `token.aleo` pattern (note: not an officially ratified ARC)
 
 When `--template` is omitted, AleoFlow uses `aleo.toml`'s `default_template`
 setting, or falls back to `payment`.

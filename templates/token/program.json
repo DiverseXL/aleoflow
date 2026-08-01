@@ -1,0 +1,6 @@
+{
+    "program": "{{PROJECT_NAME}}.aleo",
+    "version": "0.1.0",
+    "description": "A fungible token program following the community-standard token.aleo pattern",
+    "license": "MIT"
+}

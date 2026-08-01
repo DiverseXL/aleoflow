@@ -183,6 +183,7 @@ fn parse_template(s: &str) -> Option<Template> {
         "defi" => Some(Template::Defi),
         "ai-agent" => Some(Template::AiAgent),
         "gamefi" => Some(Template::Gamefi),
+        "token" => Some(Template::Token),
         _ => None,
     }
 }
@@ -239,6 +240,15 @@ static TEMPLATES: &[EmbeddedTemplate] = &[
             EmbeddedFile { rel_path: "src/main.leo",   contents: include_str!("../templates/gamefi/src/main.leo") },
             EmbeddedFile { rel_path: "README.md",      contents: include_str!("../templates/gamefi/README.md") },
             EmbeddedFile { rel_path: "tests/test_program.leo", contents: include_str!("../templates/gamefi/tests/test_program.leo") },
+        ],
+    },
+    EmbeddedTemplate {
+        name: "token",
+        files: &[
+            EmbeddedFile { rel_path: "program.json",   contents: include_str!("../templates/token/program.json") },
+            EmbeddedFile { rel_path: "src/main.leo",   contents: include_str!("../templates/token/src/main.leo") },
+            EmbeddedFile { rel_path: "README.md",      contents: include_str!("../templates/token/README.md") },
+            EmbeddedFile { rel_path: "tests/test_program.leo", contents: include_str!("../templates/token/tests/test_program.leo") },
         ],
     },
 ];
@@ -1304,6 +1314,7 @@ enum Template {
     Defi,
     AiAgent,
     Gamefi,
+    Token,
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -1364,6 +1375,7 @@ fn handle_init(args: &InitArgs, quiet: bool) -> Result<()> {
                         Template::Defi => "defi",
                         Template::AiAgent => "ai-agent",
                         Template::Gamefi => "gamefi",
+                        Template::Token => "token",
                     };
                     println!(
                         "{} Using default_template '{}' from aleo.toml",
@@ -1379,6 +1391,7 @@ fn handle_init(args: &InitArgs, quiet: bool) -> Result<()> {
         Template::Defi => "defi",
         Template::AiAgent => "ai-agent",
         Template::Gamefi => "gamefi",
+        Template::Token => "token",
     };
 
     let template = find_template(template_name).with_context(|| {
