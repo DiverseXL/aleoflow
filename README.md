@@ -88,7 +88,7 @@ cd my-app
 aleoflow build
 aleoflow test
 aleoflow audit .
-aleoflow run main
+aleoflow run transfer 100u64
 ```
 
 ## Workflow
@@ -145,7 +145,7 @@ system on top of it.
 
 ## Commands
 
-AleoFlow provides 15 top-level commands. The section below covers each one.
+AleoFlow provides 16 top-level commands. The section below covers each one.
 
 ### `aleoflow init <name> [--template <template>] [--workspace <members>]`
 
@@ -219,7 +219,7 @@ Wraps `leo fmt` to format your Leo source files using `leo-fmt`. Requires
 aleoflow fmt --path my-app
 ```
 
-### `aleoflow run <name> [inputs...] [--path <path>] [--network <network>] [--endpoint <url>] [--json-output[=<file>]]`
+### `aleoflow run <name> [inputs...] [--path <path>] [--network <network>] [--endpoint <url>] [--json-output[=<file>]] [--private-key <key>]`
 
 Locally executes a Leo transition or function in dry-run mode — compiles and
 runs it against the AVM simulator without sending any on-chain transaction.
@@ -228,8 +228,8 @@ runs it against the AVM simulator without sending any on-chain transaction.
 strings (e.g. `1u64`, `aleo1...`, `true`).
 
 ```
-aleoflow run transfer 100u64 aleo1recipient...
-aleoflow run main                                    # runs the default "main" function with no inputs
+aleoflow run transfer 100u64
+aleoflow run main                                    # only if the program defines a `main` function
 ```
 
 #### Best-effort error translation
@@ -263,7 +263,7 @@ Instruction (assert.neq r0 0u64;) at index 0 failed: 'assert.neq' failed:
 > - Connection refused on endpoint: suggests checking the endpoint URL
 > - Invalid/missing Leo project path: suggests using `--path`
 
-### `aleoflow execute <name> [inputs...] [--broadcast] [--path <path>] [--network <network>] [--endpoint <url>] [--json-output[=<file>]]`
+### `aleoflow execute <name> [inputs...] [--broadcast] [--path <path>] [--network <network>] [--endpoint <url>] [--json-output[=<file>]] [--private-key <key>]`
 
 Executes a Leo transition or function. Runs in **dry-run mode** by default
 (no transaction sent) — pass `--broadcast` to actually submit the execution
@@ -294,7 +294,7 @@ A heuristic static linter for Leo source files — **not** a formal verifier. Ch
 aleoflow audit ./my-app
 ```
 
-### `aleoflow deploy --path <path> [--network <network>] [--broadcast] [--endpoint <url>] [--json-output[=<file>]] [--package <name> | --all]`
+### `aleoflow deploy --path <path> [--network <network>] [--broadcast] [--endpoint <url>] [--json-output[=<file>]] [--package <name> | --all] [--private-key <key>]`
 
 Wraps `leo deploy`. Runs in **dry-run mode by default** — it compiles and
 prepares the deployment but does not broadcast anything unless

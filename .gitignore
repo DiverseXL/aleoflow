@@ -1,10 +1,22 @@
-target
+# Build artifacts
+/target/
+**/target/
+
+# Local devnet / node runtime data (snarkOS ledger + node secrets)
+node-*/
+node-data-*/
+.logs-*/
 
 # Test/demo projects generated during development -- not part of the tool itself
 /diag-test
+/diag_test*/
 /test-*
 /*-test
 /*-portable
+/my-token/
+
+# Remote-program fetch cache (used by `aleoflow bindings --remote`)
+.aleoflow-cache/
 
 # Leo build output inside any generated project
 **/build/
@@ -12,7 +24,9 @@ target
 
 # Local secrets -- never commit these
 .env
-*.env
+.env.*
+*.key
+private_key*
 
 # OS/editor cruft
 .DS_Store
@@ -24,3 +38,6 @@ Thumbs.db
 build.bat
 checkenv.bat
 /snarkos-bin
+
+# Built binaries at the repo root only (target/ binaries are covered above)
+/*.exe
