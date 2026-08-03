@@ -40,28 +40,10 @@ underlying compiler or network logic.
   (local test network / record scanning). Install via
   `leo devnet --install` the first time you run `aleoflow devnet`.
 
-## Install
+## Install### 1. From source (always works)
 
-### 1. Pre-built Binaries (Simplest option for quick trial)
-
-If you don't have Rust installed, the easiest way to try AleoFlow is by downloading a pre-built binary directly from the [GitHub Releases](https://github.com/DiverseXL/aleoflow/releases/latest) page.
-
-Select the binary corresponding to your platform:
-- **Linux**: `aleoflow-linux-x86_64`
-- **macOS (Apple Silicon)**: `aleoflow-macos-arm64`
-- **Windows**: `aleoflow-windows-x86_64.exe`
-
----
-
-If you prefer to build from source or contribute, the other installation options remain available:
-
-### 2. From crates.io
-
-```
-cargo install aleoflow
-```
-
-### 3. From Source
+Requires Rust (<https://rustup.rs>). Clone and install the CLI directly
+from the repository:
 
 ```
 git clone https://github.com/DiverseXL/aleoflow
@@ -79,6 +61,27 @@ cargo build --release
 The binary is fully portable — project templates are embedded into it at
 compile time, so it works from any directory without needing the
 `templates/` folder alongside it.
+
+### 2. From GitHub Releases
+
+If you don't have Rust installed, download a pre-built binary from the
+[GitHub Releases](https://github.com/DiverseXL/aleoflow/releases/latest)
+page and put it on your PATH. On Linux/macOS, run `chmod +x` on the
+downloaded file if needed.
+
+Select the binary corresponding to your platform:
+- **Linux**: `aleoflow-linux-x86_64`
+- **macOS (Apple Silicon)**: `aleoflow-macos-arm64`
+- **Windows**: `aleoflow-windows-x86_64.exe`
+
+### 3. From crates.io
+
+AleoFlow is published on crates.io, so it can be installed with the
+one-liner:
+
+```
+cargo install aleoflow
+```
 
 ## Quick Start
 

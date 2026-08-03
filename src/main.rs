@@ -1324,8 +1324,10 @@ enum Network {
     Canary,
 }
 
-/// Default endpoint used by query commands when no --endpoint or --profile resolves one.
-/// Required because `leo query` does not have a built-in fallback endpoint.
+/// Default endpoint used by query and execute commands when no --endpoint or
+/// --profile resolves one. Required because `leo query` and `leo execute` do
+/// not have a built-in fallback endpoint (unlike `leo run`/`leo deploy`, which
+/// self-default to the same URL).
 const DEFAULT_QUERY_ENDPOINT: &str = "https://api.explorer.provable.com/v1";
 
 fn main() -> Result<()> {
@@ -1865,7 +1867,7 @@ fn handle_devnet(args: &DevnetArgs, quiet: bool, profile: Option<&str>) -> Resul
                     );
                 }
             })
-    });
+    }).or(Some(Network::Testnet));
 
     // Resolve endpoint: CLI --endpoint > --profile
     let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
@@ -2232,7 +2234,7 @@ fn handle_query_block(args: &QueryBlockArgs, quiet: bool, profile: Option<&str>)
                 println!("{} Using default_network '{}' from aleo.toml", "[info]".cyan().bold(), name);
             }
         })
-    });
+    }).or(Some(Network::Testnet));
 
     // Resolve endpoint: CLI --endpoint > --profile > hardcoded default
     let endpoint = args.endpoint.as_deref()
@@ -2287,7 +2289,7 @@ fn handle_query_transaction(args: &QueryTransactionArgs, quiet: bool, profile: O
                 println!("{} Using default_network '{}' from aleo.toml", "[info]".cyan().bold(), name);
             }
         })
-    });
+    }).or(Some(Network::Testnet));
 
     // Resolve endpoint: CLI --endpoint > --profile > hardcoded default
     let endpoint = args.endpoint.as_deref()
@@ -2341,7 +2343,7 @@ fn handle_query_program(args: &QueryProgramArgs, quiet: bool, profile: Option<&s
                 println!("{} Using default_network '{}' from aleo.toml", "[info]".cyan().bold(), name);
             }
         })
-    });
+    }).or(Some(Network::Testnet));
 
     // Resolve endpoint: CLI --endpoint > --profile > hardcoded default
     let endpoint = args.endpoint.as_deref()
@@ -2386,7 +2388,7 @@ fn handle_query_stateroot(args: &QueryStaterootArgs, quiet: bool, profile: Optio
                 println!("{} Using default_network '{}' from aleo.toml", "[info]".cyan().bold(), name);
             }
         })
-    });
+    }).or(Some(Network::Testnet));
 
     // Resolve endpoint: CLI --endpoint > --profile > hardcoded default
     let endpoint = args.endpoint.as_deref()
@@ -2417,7 +2419,7 @@ fn handle_query_committee(args: &QueryCommitteeArgs, quiet: bool, profile: Optio
                 println!("{} Using default_network '{}' from aleo.toml", "[info]".cyan().bold(), name);
             }
         })
-    });
+    }).or(Some(Network::Testnet));
 
     // Resolve endpoint: CLI --endpoint > --profile > hardcoded default
     let endpoint = args.endpoint.as_deref()
@@ -3517,7 +3519,7 @@ fn handle_run(args: &RunArgs, quiet: bool, profile: Option<&str>) -> Result<()> 
                     );
                 }
             })
-    });
+    }).or(Some(Network::Testnet));
 
     // Resolve endpoint: CLI --endpoint > --profile
     let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
@@ -3579,12 +3581,15 @@ fn handle_execute(args: &ExecuteArgs, quiet: bool, profile: Option<&str>) -> Res
                     );
                 }
             })
-    });
+    }).or(Some(Network::Testnet));
 
     let dir = args.path.as_deref();
 
-    // Resolve endpoint: CLI --endpoint > --profile
-    let endpoint = args.endpoint.as_deref().or(profile_res.endpoint.as_deref());
+    // Resolve endpoint: CLI --endpoint > --profile > default (explorer API)
+    let endpoint = args.endpoint
+        .as_deref()
+        .or(profile_res.endpoint.as_deref())
+        .or(Some(DEFAULT_QUERY_ENDPOINT));
 
     // Mainnet + broadcast: print informational warning (same pattern as deploy)
     if args.broadcast && matches!(network, Some(Network::Mainnet)) {
