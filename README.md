@@ -604,6 +604,17 @@ Deployed with:
 aleoflow deploy --path diag-test --network testnet --broadcast
 ```
 
+## Releases
+
+AleoFlow is distributed through two channels, both currently at version
+**0.1.1**:
+
+- **crates.io** — install with `cargo install aleoflow`:
+  <https://crates.io/crates/aleoflow>
+- **GitHub Releases** — pre-built binaries for Linux, macOS (Apple Silicon),
+  and Windows, built automatically for each `v*` tag:
+  <https://github.com/DiverseXL/aleoflow/releases>
+
 ## Deploying for real
 
 `leo deploy` (and therefore `aleoflow deploy --broadcast`) requires a
