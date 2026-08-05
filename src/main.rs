@@ -1,4 +1,5 @@
 mod leo_cmd;
+mod mcp;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, Args};
@@ -874,6 +875,10 @@ enum Commands {
     /// Query Aleo network state (block, transaction, program, stateroot, committee)
     #[command(subcommand)]
     Query(QueryCmd),
+    /// Run AleoFlow as a local MCP (Model Context Protocol) server over stdio,
+    /// exposing AleoFlow commands as tools for AI coding assistants.
+    /// Broadcast (funds-spending) tools require ALEOFLOW_MCP_ALLOW_BROADCAST=true.
+    Mcp(McpArgs),
 }
 
 #[derive(Subcommand)]
@@ -1208,6 +1213,12 @@ struct EnvArgs {
     endpoint: Option<String>,
 }
 
+#[derive(Args)]
+struct McpArgs {
+    // No arguments: the MCP server reads JSON-RPC messages from stdin and
+    // writes protocol responses to stdout. All diagnostics go to stderr.
+}
+
 // ---------------------------------------------------------------------------
 // Account command: nested subcommands mirroring the RecordsCmd pattern
 // ---------------------------------------------------------------------------
@@ -1352,6 +1363,7 @@ fn main() -> Result<()> {
         Commands::Account(cmd) => handle_account(cmd, quiet),
         Commands::Env(args) => handle_env(args, quiet, profile),
         Commands::Query(cmd) => handle_query(cmd, quiet, profile),
+        Commands::Mcp(_args) => mcp::run(),
     }
 }
 

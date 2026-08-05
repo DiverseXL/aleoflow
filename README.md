@@ -591,6 +591,98 @@ Accepts the same `--profile`, `--network`, and `--endpoint` flags as
 other commands, so you can preview "what would happen if I ran X with
 these flags" before actually running anything.
 
+## MCP Server
+
+`aleoflow mcp` runs AleoFlow as a local **MCP (Model Context Protocol)**
+server over stdio. This lets AI coding assistants such as Claude Desktop and
+Claude Code scaffold, build, test, audit, query, and deploy Aleo programs
+through AleoFlow during a coding session — no need to switch to a terminal
+or remember AleoFlow's flags.
+
+The server exposes each AleoFlow command as a tool that maps 1:1 to its CLI
+subcommand (the same pattern as the official `mcp-server-git` reference
+implementation): the handler re-invokes the `aleoflow` binary with the
+corresponding arguments and returns the real command output as MCP text
+content — never a summarized or reformatted version.
+
+### Configuration
+
+Point your MCP client at the `aleoflow` binary with `mcp` as the argument.
+For Claude Desktop, edit `claude_desktop_config.json` (Claude > Settings >
+Developer > Edit Config):
+
+```json
+{
+  "mcpServers": {
+    "aleoflow": {
+      "command": "/absolute/path/to/aleoflow",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+For Claude Code:
+
+```
+claude mcp add aleoflow -- /absolute/path/to/aleoflow mcp
+```
+
+The server prints a one-line startup message to **stderr** (stdout is
+reserved for the MCP protocol stream) indicating whether the broadcast
+tools are enabled or disabled for the session.
+
+### Tools
+
+Safe tools (always available, no funds spent):
+
+- `aleoflow_init` — `aleoflow init`
+- `aleoflow_build` — `aleoflow build`
+- `aleoflow_test` — `aleoflow test`
+- `aleoflow_audit` — `aleoflow audit`
+- `aleoflow_query` — `aleoflow query`
+- `aleoflow_doctor` — `aleoflow doctor`
+- `aleoflow_bindings` — `aleoflow bindings`
+- `aleoflow_run` — `aleoflow run` (local-only; no transaction is ever sent)
+
+Dry-run tools (safe, simulate only):
+
+- `aleoflow_deploy_dry_run` — `aleoflow deploy` without `--broadcast`
+- `aleoflow_execute_dry_run` — `aleoflow execute` without `--broadcast`
+
+Broadcast tools (spend real funds):
+
+- `aleoflow_deploy_broadcast` — `aleoflow deploy --broadcast`
+- `aleoflow_execute_broadcast` — `aleoflow execute --broadcast`
+
+### Safety model
+
+MCP has no built-in "requires confirmation" primitive. AleoFlow follows the
+established ecosystem convention for destructive/costly operations: a
+two-step dry-run / broadcast split.
+
+- Deploy and execute default to dry-run — `aleoflow deploy` and
+  `aleoflow execute` already refuse to spend funds without `--broadcast`,
+  and the dry-run MCP tools never pass that flag. An AI agent cannot spend
+  funds through them.
+- The broadcast tools require a `confirm: true` argument, and their
+  descriptions instruct the calling model to run the matching dry-run tool
+  first and to only call them after the user has explicitly reviewed the
+  dry-run output and approved spending real funds.
+- Broadcast tools are **only registered** when the server is started with
+  `ALEOFLOW_MCP_ALLOW_BROADCAST=true`. Without it, they are genuinely
+  absent from the tool list — a calling model has no way to even attempt
+  to spend funds unless the user explicitly opted in at server start:
+
+  ```
+  ALEOFLOW_MCP_ALLOW_BROADCAST=true aleoflow mcp
+  ```
+
+Private keys are never accepted as tool arguments, never appear in tool
+descriptions or schemas, and are never returned in tool output. Keys are
+read from the `PRIVATE_KEY` environment variable or the project's `.env`
+file by the underlying `leo` process.
+
 ## Proof of deployment
 
 AleoFlow has been used to deploy a real program to Aleo testnet:

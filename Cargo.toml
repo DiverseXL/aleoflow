@@ -17,3 +17,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# Official Rust MCP SDK (modelcontextprotocol/rust-sdk). Chosen over the
+# community alternatives (rust-mcp-sdk, mcp-rust) because it is maintained
+# by the modelcontextprotocol org, is by far the most downloaded
+# (18.8M+ total, ~9.5M recent at the time of writing), and is published
+# regularly. Features: server+macros+schemars for tool definition, and
+# transport-io for the stdio transport used by `aleoflow mcp`.
+rmcp = { version = "3.1", features = ["server", "macros", "schemars", "transport-io"] }
