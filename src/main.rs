@@ -845,6 +845,7 @@ mod tests {
 #[derive(Parser)]
 #[command(name = "aleoflow")]
 #[command(about = "A developer toolkit for building on Aleo", long_about = None)]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
