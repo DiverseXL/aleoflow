@@ -817,6 +817,28 @@ mod tests {
         let reason = validate_private_key_format(short).unwrap();
         assert!(reason.contains("length") || reason.contains("59"));
     }
+
+    // -----------------------------------------------------------------------
+    // Send: format_send_amount
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_send_amount_valid() {
+        // 1 credit = 1,000,000 microcredits; formatting appends the u64 literal
+        // required by credits.aleo's transfer_public(to, amount) signature.
+        assert_eq!(format_send_amount("1000000").unwrap(), "1000000u64");
+        assert_eq!(format_send_amount("0").unwrap(), "0u64");
+        assert_eq!(format_send_amount("18446744073709551615").unwrap(), "18446744073709551615u64");
+    }
+
+    #[test]
+    fn test_format_send_amount_rejects_non_u64() {
+        assert!(format_send_amount("-5").is_err());
+        assert!(format_send_amount("1.5").is_err());
+        assert!(format_send_amount("abc").is_err());
+        assert!(format_send_amount("").is_err());
+        assert!(format_send_amount("99999999999999999999").is_err());
+    }
 }
 
 
@@ -860,6 +882,9 @@ enum Commands {
     /// Execute a transition/function on-chain (dry-run unless --broadcast).
     /// Best-effort error translation is applied to known leo failure patterns.
     Execute(ExecuteArgs),
+    /// Send testnet credits to an Aleo address via credits.aleo's transfer_public
+    /// transition (dry-run unless --broadcast). Amount is in microcredits.
+    Send(SendArgs),
     /// Scan, list, and manage Aleo records via snarkOS
     #[command(subcommand)]
     Records(RecordsCmd),
@@ -1193,6 +1218,29 @@ struct ExecuteArgs {
 }
 
 #[derive(Args)]
+#[command(
+    after_help = "For private transfers, use `aleoflow execute transfer_private <record> <to> <amount>` directly once you have a record from `aleoflow records list`."
+)]
+struct SendArgs {
+    /// Recipient Aleo address (aleo1...)
+    to: String,
+    /// Amount to send, in microcredits (e.g. 1000000 = 1 credit)
+    amount: String,
+    /// Target network
+    #[arg(long, value_parser = clap::value_parser!(Network))]
+    network: Option<Network>,
+    /// Aleo network endpoint URL
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// Actually broadcast the transfer transaction (without this, runs in dry-run mode)
+    #[arg(long)]
+    broadcast: bool,
+    /// Account private key for the transfer
+    #[arg(long)]
+    pub private_key: Option<String>,
+}
+
+#[derive(Args)]
 struct DoctorArgs {
     // No arguments needed; doctor diagnoses the environment automatically.
 }
@@ -1357,6 +1405,7 @@ fn main() -> Result<()> {
         Commands::Bindings(args) => handle_bindings(args, quiet),
         Commands::Run(args) => handle_run(args, quiet, profile),
         Commands::Execute(args) => handle_execute(args, quiet, profile),
+        Commands::Send(args) => handle_send(args, quiet, profile),
         Commands::Records(cmd) => handle_records(cmd, quiet, profile),
         Commands::Faucet(args) => handle_faucet(args),
         Commands::Doctor(args) => handle_doctor(args, quiet),
@@ -3654,6 +3703,133 @@ fn handle_execute(args: &ExecuteArgs, quiet: bool, profile: Option<&str>) -> Res
     let (result, captured_stderr) = leo_cmd::run_leo_captured("execute", &extra_args, dir);
     if let Err(ref _e) = result {
         translate_run_execute_error(&captured_stderr, &args.name, args.path.as_deref());
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Send command: wrap leo execute credits.aleo::transfer_public
+// ---------------------------------------------------------------------------
+
+/// Validate that `amount` is a whole number of microcredits and format it as a
+/// Leo u64 literal for credits.aleo's transfer_public transition.
+/// Returns an error message instead of shelling out to leo with garbage input.
+fn format_send_amount(amount: &str) -> Result<String> {
+    if amount.parse::<u64>().is_err() {
+        bail!(
+            "Invalid amount '{}': expected a whole number of microcredits, e.g. 1000000 = 1 credit.",
+            amount
+        );
+    }
+    Ok(format!("{}u64", amount))
+}
+
+/// `aleoflow send <to> <amount>`: a convenience wrapper around
+/// `leo execute credits.aleo::transfer_public <to> <amount>u64` for easy fund
+/// transfers. The transition is program-qualified per leo's CLI (verified
+/// against the live credits.aleo interface: transfer_public(to, amount)).
+/// Dry-run unless --broadcast, same safety convention as deploy/execute.
+fn handle_send(args: &SendArgs, quiet: bool, profile: Option<&str>) -> Result<()> {
+    // Validate private key format before any subprocess runs
+    if let Some(ref pk) = args.private_key {
+        if let Some(reason) = validate_private_key_format(pk) {
+            bail!("{}", reason);
+        }
+    }
+
+    // Validate the amount and format it as a u64 literal before shelling out.
+    let amount_lit = format_send_amount(&args.amount)?;
+
+    if !leo_cmd::leo_is_installed() {
+        bail!(
+            "leo is not installed or not on PATH. Install it with: cargo binstall leo-lang"
+        );
+    }
+
+    let cfg = load_aleoflow_config();
+    let profile_res = resolve_profile(profile, &cfg, quiet)?;
+
+    // Resolve network: CLI --network > --profile > config > default (Testnet)
+    let network = args.network.clone().or(profile_res.network).or_else(|| {
+        cfg.default_network
+            .as_deref()
+            .and_then(parse_network)
+            .inspect(|n| {
+                if !quiet {
+                    let name = match n {
+                        Network::Testnet => "testnet",
+                        Network::Mainnet => "mainnet",
+                        Network::Canary => "canary",
+                    };
+                    println!(
+                        "{} Using default_network '{}' from aleo.toml",
+                        "[info]".cyan().bold(),
+                        name
+                    );
+                }
+            })
+    }).or(Some(Network::Testnet));
+
+    // Resolve endpoint: CLI --endpoint > --profile > default (explorer API)
+    let endpoint = args.endpoint
+        .as_deref()
+        .or(profile_res.endpoint.as_deref())
+        .or(Some(DEFAULT_QUERY_ENDPOINT));
+
+    // Mainnet + broadcast: print informational warning (same pattern as deploy/execute)
+    if args.broadcast && matches!(network, Some(Network::Mainnet)) {
+        println!(
+            "{} {}",
+            "[warning]".yellow().bold(),
+            "Sending funds on MAINNET with --broadcast. This is irreversible and costs real fees."
+        );
+    }
+
+    // credits.aleo transfer_public signature (verified live):
+    //   input r0 as address.public;  // to
+    //   input r1 as u64.public;      // amount (microcredits)
+    let private_key = args.private_key.as_deref();
+    let mut extra_args = build_leo_run_args(
+        "credits.aleo::transfer_public",
+        &[args.to.clone(), amount_lit],
+        network.as_ref(),
+        endpoint,
+        &None,
+        private_key,
+    );
+
+    if args.broadcast {
+        extra_args.push("--broadcast".to_string());
+    }
+
+    // Do NOT pass --yes to leo. Leo's own help text warns against it:
+    // "DO NOT SET THIS FLAG UNLESS YOU KNOW WHAT YOU ARE DOING"
+    // Let leo's own confirmation prompts surface via inherited stdout/stderr.
+
+    if args.broadcast {
+        print_info(
+            &format!(
+                "Broadcasting transfer_public to '{}'...",
+                match network {
+                    Some(Network::Testnet) => "testnet",
+                    Some(Network::Mainnet) => "mainnet",
+                    Some(Network::Canary) => "canary",
+                    None => "default",
+                }
+            ),
+            quiet,
+        );
+    } else {
+        print_info(
+            "Running in dry-run mode (no --broadcast passed). Add --broadcast to actually send the transfer.",
+            quiet,
+        );
+    }
+
+    // Run with stderr capture for best-effort error translation
+    let (result, captured_stderr) = leo_cmd::run_leo_captured("execute", &extra_args, None);
+    if let Err(_e) = &result {
+        translate_run_execute_error(&captured_stderr, "transfer_public", None);
     }
     result
 }
