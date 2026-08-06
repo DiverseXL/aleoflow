@@ -679,11 +679,13 @@ Dry-run tools (safe, simulate only):
 
 - `aleoflow_deploy_dry_run` — `aleoflow deploy` without `--broadcast`
 - `aleoflow_execute_dry_run` — `aleoflow execute` without `--broadcast`
+- `aleoflow_send_dry_run` — `aleoflow send` without `--broadcast`
 
 Broadcast tools (spend real funds):
 
 - `aleoflow_deploy_broadcast` — `aleoflow deploy --broadcast`
 - `aleoflow_execute_broadcast` — `aleoflow execute --broadcast`
+- `aleoflow_send_broadcast` — `aleoflow send --broadcast`
 
 ### Safety model
 
@@ -691,18 +693,19 @@ MCP has no built-in "requires confirmation" primitive. AleoFlow follows the
 established ecosystem convention for destructive/costly operations: a
 two-step dry-run / broadcast split.
 
-- Deploy and execute default to dry-run — `aleoflow deploy` and
-  `aleoflow execute` already refuse to spend funds without `--broadcast`,
-  and the dry-run MCP tools never pass that flag. An AI agent cannot spend
-  funds through them.
+- Deploy, execute, and send default to dry-run — `aleoflow deploy`,
+  `aleoflow execute`, and `aleoflow send` already refuse to spend funds
+  without `--broadcast`, and the dry-run MCP tools never pass that flag. An
+  AI agent cannot spend funds through them.
 - The broadcast tools require a `confirm: true` argument, and their
   descriptions instruct the calling model to run the matching dry-run tool
   first and to only call them after the user has explicitly reviewed the
   dry-run output and approved spending real funds.
 - Broadcast tools are **only registered** when the server is started with
   `ALEOFLOW_MCP_ALLOW_BROADCAST=true`. Without it, they are genuinely
-  absent from the tool list — a calling model has no way to even attempt
-  to spend funds unless the user explicitly opted in at server start:
+  absent from the `tools/list` listing and any call is refused — a calling
+  model has no way to even attempt to spend funds unless the user
+  explicitly opted in at server start:
 
   ```
   ALEOFLOW_MCP_ALLOW_BROADCAST=true aleoflow mcp
@@ -729,7 +732,7 @@ aleoflow deploy --path diag-test --network testnet --broadcast
 ## Releases
 
 AleoFlow is distributed through two channels, both currently at version
-**0.1.1**:
+**0.2.0**:
 
 - **crates.io** — install with `cargo install aleoflow`:
   <https://crates.io/crates/aleoflow>

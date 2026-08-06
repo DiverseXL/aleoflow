@@ -19,12 +19,14 @@
 //! to dry-run and only spend funds with an explicit `--broadcast` flag; the
 //! MCP tools mirror that:
 //!
-//! - `aleoflow_deploy_dry_run` / `aleoflow_execute_dry_run` never pass
-//!   `--broadcast`, so no funds can ever be spent through them.
-//! - `aleoflow_deploy_broadcast` / `aleoflow_execute_broadcast` require a
-//!   `confirm: true` argument AND are only registered when the server is
-//!   started with `ALEOFLOW_MCP_ALLOW_BROADCAST=true`. When the variable is
-//!   unset these tools are genuinely absent from the tool list, so a calling
+//! - `aleoflow_deploy_dry_run` / `aleoflow_execute_dry_run` / `aleoflow_send_dry_run`
+//!   never pass `--broadcast`, so no funds can ever be spent through them.
+//! - `aleoflow_deploy_broadcast` / `aleoflow_execute_broadcast` /
+//!   `aleoflow_send_broadcast` require a `confirm: true` argument AND are only
+//!   registered when the server is started with `ALEOFLOW_MCP_ALLOW_BROADCAST=true`.
+//!   When the variable is unset these tools are genuinely absent from the
+//!   `tools/list` listing and any call is refused (verified live: they do not
+//!   appear in tools/list and calls return "tool not found"), so a calling
 //!   model cannot even attempt to spend funds.
 
 use rmcp::{
@@ -42,9 +44,10 @@ use tokio::process::Command as TokioCommand;
 const ALLOW_BROADCAST_ENV: &str = "ALEOFLOW_MCP_ALLOW_BROADCAST";
 
 /// Names of the tools that spend real funds and are gated behind the env var.
-const BROADCAST_TOOLS: [&str; 2] = [
+const BROADCAST_TOOLS: [&str; 3] = [
     "aleoflow_deploy_broadcast",
     "aleoflow_execute_broadcast",
+    "aleoflow_send_broadcast",
 ];
 
 /// Returns `true` only when `ALEOFLOW_MCP_ALLOW_BROADCAST=true` is set.
@@ -61,13 +64,14 @@ pub async fn run_server() -> anyhow::Result<()> {
     if broadcast_allowed() {
         eprintln!(
             "[aleoflow-mcp] broadcast tools ENABLED (ALEOFLOW_MCP_ALLOW_BROADCAST=true): \
-             aleoflow_deploy_broadcast and aleoflow_execute_broadcast are registered"
+             aleoflow_deploy_broadcast, aleoflow_execute_broadcast, and \
+             aleoflow_send_broadcast are registered"
         );
     } else {
         eprintln!(
             "[aleoflow-mcp] broadcast tools DISABLED: set ALEOFLOW_MCP_ALLOW_BROADCAST=true \
-             to enable the funds-spending tools aleoflow_deploy_broadcast and \
-             aleoflow_execute_broadcast"
+             to enable the funds-spending tools aleoflow_deploy_broadcast, \
+             aleoflow_execute_broadcast, and aleoflow_send_broadcast"
         );
     }
 
@@ -581,6 +585,51 @@ struct BroadcastExecuteParams {
     profile: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+struct SendParams {
+    /// Recipient Aleo address (aleo1...)
+    to: String,
+    /// Amount to send, in microcredits (e.g. 1000000 = 1 credit)
+    amount: String,
+    /// Target network: testnet, mainnet, or canary
+    network: Option<NetworkArg>,
+    /// Aleo network endpoint URL
+    endpoint: Option<String>,
+    /// Named environment profile from aleo.toml (sets network/endpoint)
+    profile: Option<String>,
+}
+
+impl SendParams {
+    /// Build the trailing `aleoflow send ...` args. `broadcast` controls
+    /// whether the funds-spending `--broadcast` flag is appended.
+    fn to_cli_args(&self, broadcast: bool) -> Vec<String> {
+        let mut args = vec!["send".to_string(), self.to.clone(), self.amount.clone()];
+        push_network(&mut args, &self.network);
+        push_opt(&mut args, "--endpoint", self.endpoint.as_deref());
+        push_profile(&mut args, &self.profile);
+        if broadcast {
+            args.push("--broadcast".to_string());
+        }
+        args
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+struct BroadcastSendParams {
+    /// Explicit user acknowledgment that real funds may be spent. Must be true.
+    confirm: bool,
+    /// Recipient Aleo address (aleo1...)
+    to: String,
+    /// Amount to send, in microcredits (e.g. 1000000 = 1 credit)
+    amount: String,
+    /// Target network: testnet, mainnet, or canary
+    network: Option<NetworkArg>,
+    /// Aleo network endpoint URL
+    endpoint: Option<String>,
+    /// Named environment profile from aleo.toml (sets network/endpoint)
+    profile: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // The MCP server: tools-only server using a ToolRouter field so broadcast
 // tools can be disabled at startup based on ALEOFLOW_MCP_ALLOW_BROADCAST.
@@ -788,6 +837,48 @@ impl AleoflowMcp {
         let out = run_aleoflow_cli(&args).await;
         Ok(command_result(&args.join(" "), &out))
     }
+
+    /// Send credits to an Aleo address (dry-run, no funds spent).
+    /// Maps to: `aleoflow send <to> <amount>` WITHOUT --broadcast.
+    #[tool(description = "Send credits to an Aleo address in DRY-RUN mode. Maps to: aleoflow send <to> <amount> [--network <network>] [--endpoint <url>], without the --broadcast flag: leo simulates credits.aleo's transfer_public and reports the would-be result and fee, but NO transaction is broadcast and NO funds are spent. The amount is in microcredits (1000000 = 1 credit). If the user wants to actually send funds, show them this dry-run output first, then use aleoflow_send_broadcast only after they explicitly confirm.")]
+    async fn aleoflow_send_dry_run(
+        &self,
+        Parameters(p): Parameters<SendParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = p.to_cli_args(false);
+        let out = run_aleoflow_cli(&args).await;
+        Ok(command_result(&args.join(" "), &out))
+    }
+
+    /// Send credits to an Aleo address and BROADCAST the transfer (spends funds).
+    /// Maps to: `aleoflow send <to> <amount> --broadcast`. Requires confirm=true.
+    /// Only registered when ALEOFLOW_MCP_ALLOW_BROADCAST=true.
+    #[tool(description = "Send credits to an Aleo address and BROADCAST the transfer transaction, spending REAL funds (network fees + the transferred amount). Maps to: aleoflow send <to> <amount> --broadcast. Do not call this tool unless the user has explicitly reviewed the dry-run output and confirmed they want to spend real funds. Always call aleoflow_send_dry_run first and show the user the result before calling this. The confirm parameter MUST be set to true, which is your acknowledgment that the user has explicitly approved spending funds. Private keys are never passed as arguments; the key is read from the PRIVATE_KEY environment variable or the project's .env file.")]
+    async fn aleoflow_send_broadcast(
+        &self,
+        Parameters(p): Parameters<BroadcastSendParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if !p.confirm {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "Refused: this tool spends real funds and requires confirm=true. \
+                 Call aleoflow_send_dry_run first, show the user its output, and \
+                 only retry after they explicitly approve spending funds.",
+            )]));
+        }
+        if !broadcast_allowed() {
+            return Ok(broadcast_disabled_message());
+        }
+        let args = SendParams {
+            to: p.to.clone(),
+            amount: p.amount.clone(),
+            network: p.network.clone(),
+            endpoint: p.endpoint.clone(),
+            profile: p.profile.clone(),
+        }
+        .to_cli_args(true);
+        let out = run_aleoflow_cli(&args).await;
+        Ok(command_result(&args.join(" "), &out))
+    }
 }
 
 impl AleoflowMcp {
@@ -809,12 +900,12 @@ impl AleoflowMcp {
     name = "aleoflow",
     instructions = "AleoFlow MCP server: scaffold, build, test, audit, query, and deploy Aleo programs. \
         Safe and dry-run tools never spend funds. The broadcast tools \
-        (aleoflow_deploy_broadcast, aleoflow_execute_broadcast) spend REAL funds: \
-        always run the matching dry-run tool first, show the user its output, and only \
-        call a broadcast tool after the user explicitly confirms. Broadcast tools are \
-        only available when the server was started with ALEOFLOW_MCP_ALLOW_BROADCAST=true. \
-        Private keys are never accepted as tool arguments; they come from the PRIVATE_KEY \
-        environment variable or the project's .env file."
+        (aleoflow_deploy_broadcast, aleoflow_execute_broadcast, aleoflow_send_broadcast) \
+        spend REAL funds: always run the matching dry-run tool first, show the user its \
+        output, and only call a broadcast tool after the user explicitly confirms. Broadcast \
+        tools are only available when the server was started with \
+        ALEOFLOW_MCP_ALLOW_BROADCAST=true. Private keys are never accepted as tool arguments; \
+        they come from the PRIVATE_KEY environment variable or the project's .env file."
 )]
 impl ServerHandler for AleoflowMcp {}
 
@@ -886,6 +977,55 @@ mod tests {
         assert!(
             args.iter().any(|a| a == "--broadcast"),
             "broadcast execute must pass --broadcast: {args:?}"
+        );
+    }
+
+    fn send_params() -> SendParams {
+        SendParams {
+            to: "aleo1abc".to_string(),
+            amount: "1000000".to_string(),
+            network: Some(NetworkArg::Testnet),
+            endpoint: Some("https://api.example.com".to_string()),
+            profile: None,
+        }
+    }
+
+    #[test]
+    fn test_send_dry_run_never_emits_broadcast() {
+        let args = send_params().to_cli_args(false);
+        assert_eq!(args.first().map(String::as_str), Some("send"));
+        // Positional order matches the CLI: send <to> <amount>
+        assert_eq!(args[1], "aleo1abc");
+        assert_eq!(args[2], "1000000");
+        assert!(
+            !args.iter().any(|a| a == "--broadcast"),
+            "dry-run send must not pass --broadcast: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_send_broadcast_emits_broadcast() {
+        let args = send_params().to_cli_args(true);
+        assert!(
+            args.iter().any(|a| a == "--broadcast"),
+            "broadcast send must pass --broadcast: {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_send_args_network_endpoint_mapping() {
+        let args = send_params().to_cli_args(false);
+        assert_eq!(
+            args,
+            vec![
+                "send",
+                "aleo1abc",
+                "1000000",
+                "--network",
+                "testnet",
+                "--endpoint",
+                "https://api.example.com",
+            ]
         );
     }
 

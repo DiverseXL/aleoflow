@@ -1,6 +1,6 @@
 [package]
 name = "aleoflow"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "A developer CLI for Aleo — scaffold, build, test, audit, deploy, and generate TypeScript bindings for Leo programs."
 repository = "https://github.com/DiverseXL/aleoflow"
