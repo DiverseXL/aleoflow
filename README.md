@@ -116,7 +116,7 @@ flowchart LR
 ```
 
 Each stage wraps a real underlying tool rather than reinventing it —
-`build`/`test`/`deploy`/`devnet`/`run`/`execute`/`fmt`/`account`/`query` shell
+`build`/`test`/`deploy`/`devnet`/`run`/`execute`/`send`/`fmt`/`account`/`query` shell
 out to the official `leo` binary; `audit` and `bindings` are AleoFlow-native
 additions that fill gaps the official toolchain doesn't cover; `doctor`
 checks the local development environment; `records list` shells out to
@@ -148,7 +148,7 @@ system on top of it.
 
 ## Commands
 
-AleoFlow provides 16 top-level commands. The section below covers each one.
+AleoFlow provides 18 top-level commands. The section below covers each one.
 
 ### `aleoflow init <name> [--template <template>] [--workspace <members>]`
 
@@ -282,6 +282,36 @@ proceeding, matching the same safety convention as `deploy`.
 
 Same best-effort error translation as `run` applies — see the run section
 for details.
+
+### `aleoflow send <to> <amount> [--broadcast] [--network <network>] [--endpoint <url>] [--private-key <key>]`
+
+A convenience wrapper around `leo execute credits.aleo::transfer_public` for
+sending credits to an Aleo address. It works from any directory — no local
+Leo project is needed, because the `credits.aleo` program is fetched from
+the network.
+
+`<amount>` is in **microcredits**: 1 credit = 1,000,000 microcredits, so
+`1000000` sends 1 credit. Non-integer amounts are rejected with a clear
+error before anything is executed.
+
+Runs in **dry-run mode by default** (simulates the transfer, no transaction
+sent) — pass `--broadcast` to actually submit the transfer to the network.
+This matches the same safety convention as `execute` and `deploy`;
+broadcasting on `mainnet` prints an explicit warning first.
+
+```
+aleoflow send aleo1recipient... 1000000 --network testnet                # dry run
+aleoflow send aleo1recipient... 1000000 --network testnet --broadcast     # real transfer
+```
+
+Requires a funded sender account — see **Deploying for real** for setting
+up `PRIVATE_KEY`.
+
+Private transfers (`transfer_private`, `transfer_private_to_public`,
+`transfer_public_to_private`) are not part of this convenience command: they
+require an actual owned `credits.record` as input. To send privately, first
+obtain a record with `aleoflow records list`, then use
+`aleoflow execute transfer_private <record> <to> <amount>` directly.
 
 ### `aleoflow audit <path>`
 
@@ -818,7 +848,7 @@ default_template = "payment"
 ```
 
 - `default_template` — used by `init` when `--template` is omitted
-- `default_network` — used by `deploy`, `devnet`, `run`, `execute`, and
+- `default_network` — used by `deploy`, `devnet`, `run`, `execute`, `send`, and
   `query` commands when `--network` is omitted
 
 If the file is missing, malformed, or simply not present, AleoFlow falls
@@ -858,7 +888,7 @@ aleoflow run transfer 1u64 --profile mainnet
 If the profile name does not exist, AleoFlow prints a clear error listing
 all available profiles.
 
-Profiles are available on: `deploy`, `devnet`, `run`, `execute`, `query`,
+Profiles are available on: `deploy`, `devnet`, `run`, `execute`, `send`, `query`,
 `records list`, and `env`.
 
 > [!IMPORTANT]

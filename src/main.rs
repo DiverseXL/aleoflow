@@ -3505,7 +3505,9 @@ fn translate_run_execute_error(stderr: &str, func_name: &str, project_dir: Optio
     }
 
     // 2. PRIVATE_KEY missing
-    if stderr.contains("Failed to load 'PRIVATE_KEY'") {
+    // leo emits this with backticks (confirmed against real output):
+    //   Error [ECLI0377045]: Failed to load `PRIVATE_KEY` from the environment: ...
+    if stderr.contains("Failed to load `PRIVATE_KEY`") {
         println!(
             "  {} Set PRIVATE_KEY via 'aleoflow account new' or your .env file, then retry.",
             "[aleoflow]".cyan().bold()
